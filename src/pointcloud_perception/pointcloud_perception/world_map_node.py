@@ -3,7 +3,14 @@
 # pointcloud_node.py(실시간 매 프레임 obstacle_state)와는 별개로, 넓은 영역을
 # MoveLine으로 훑으면서 point cloud를 base_link 기준으로 merge한 뒤 DBSCAN으로
 # 군집화해서 장애물 위치를 뽑아낸다. cobot_ws의 ~/cobot_scan/world_map_scan_capture_ranged.py
-# (지그재그 스캔 경로 + 코너 틸트 + TF 변환)에서 이미 검증된 로직을 그대로 포팅했다.
+# (지그재그 스캔 경로 + TF 변환)에서 이미 검증된 로직을 그대로 포팅했다.
+#
+# 애초에 그리드의 각 코너에서 제자리 회전(A/B만 변경)으로 중심을 바라보게
+# 만들려 했었는데, 카메라가 flange 원점에서 T_gripper2camera만큼 떨어져 있어서
+# 제자리 회전만으로는 원하는 옆면 뷰가 안 나온다는 걸 실제 로봇으로 확인함
+# (2026-07-06). 대신 스캔 시작/끝 지점에서만 중심 반대쪽으로 더 물러나면서
+# 살짝 내려간 위치로 이동해, 손으로 직접 찾은 자세로 옆면을 찍고 다시 원래
+# 그리드로 돌아오는 방식으로 변경했다.
 #
 # service/topic 콜백(handle_update) 안에서 MoveLine 서비스 호출과 point cloud
 # 대기를 위해 spin_until_future_complete/spin_once를 반복 호출해야 하는데,
@@ -58,8 +65,12 @@ FIXED_A_DEG = 1.488
 FIXED_B_DEG = -180.0
 FIXED_C_DEG = -178.73
 
-# 열의 시작/끝(꼭짓점) 포즈에서 스캔 중심을 향해 이만큼(deg) 기울인다. 0이면 비활성화.
-TILT_DEG = 15.0
+# 스캔 시작/끝 지점에서 옆면을 찍기 위한 "사이드뷰" 여분 포즈.
+# 실제 로봇을 손으로 움직여 찾은 값이라 정밀하지 않음 (2026-07-06) - 실측 후 조정 필요.
+SIDE_VIEW_Y_OFFSET_MM = 50.0  # 중심 반대쪽으로 이만큼 더 물러난다
+SIDE_VIEW_Z_DROP_MM = 30.0    # FIXED_Z_MM에서 이만큼 낮춘다 (정확한 값 아님, placeholder)
+SIDE_VIEW_START_ABC_DEG = (98.7, -154.71, -82.0)
+SIDE_VIEW_END_ABC_DEG = (92.3, 142.3, -90.13)
 
 VEL = [20.0, 5.0]
 ACC = [20.0, 5.0]
@@ -80,7 +91,7 @@ RECORD_DIR = os.path.expanduser("~/cobot_scan")
 
 
 # =========================
-# 스캔 경로 생성 (지그재그 + 코너 틸트)
+# 스캔 경로 생성 (지그재그 그리드 + 시작/끝 사이드뷰)
 # =========================
 
 def make_inclusive_range(start: float, end: float, step_abs: float):
@@ -109,44 +120,36 @@ def generate_scan_columns():
     return columns
 
 
-SCAN_CENTER_X = (START_POINT["x"] + END_POINT["x"]) / 2.0
-SCAN_CENTER_Y = (START_POINT["y"] + END_POINT["y"]) / 2.0
-
-
-def tilted_orientation_toward_center(x, y):
-    """(x, y) 지점에서 스캔 영역 중심을 바라보도록 TILT_DEG만큼 기울인 (A, B, C) [deg] 반환.
-
-    FIXED_B_DEG=-180 근처(카메라가 거의 수직 아래를 보는 자세)라는 전제 하에,
-    로컬 Z축(카메라 광축과 방향이 거의 같음)이 base 기준으로 정확히 (dx, dy)
-    수평 방향을 향하도록 A, B만 바꾸고 C는 그대로 둔다.
-    (검증: 2026-07-06 세션에서 scipy Rotation으로 dot product = 1.0 확인)
-    """
-    dx = SCAN_CENTER_X - x
-    dy = SCAN_CENTER_Y - y
-    norm = math.hypot(dx, dy)
-    if norm < 1e-6:
-        return FIXED_A_DEG, FIXED_B_DEG, FIXED_C_DEG
-
-    dx, dy = dx / norm, dy / norm
-    a_new = math.degrees(math.atan2(-dy, -dx))
-    b_new = FIXED_B_DEG + TILT_DEG
-    c_new = FIXED_C_DEG
-    return a_new, b_new, c_new
+def generate_flat_scan_poses():
+    """평범한 탑다운 지그재그 그리드 포즈 (틸트 없음)."""
+    poses = []
+    for x, ys in generate_scan_columns():
+        for y in ys:
+            poses.append([
+                float(x), float(y), float(FIXED_Z_MM),
+                float(FIXED_A_DEG), float(FIXED_B_DEG), float(FIXED_C_DEG),
+            ])
+    return poses
 
 
 def generate_scan_poses():
-    """열의 시작/끝(꼭짓점) 포즈에는 코너 틸트를 적용한 [x, y, z, A, B, C] 리스트 생성."""
-    poses = []
-    for x, ys in generate_scan_columns():
-        n = len(ys)
-        for iy, y in enumerate(ys):
-            is_corner = (iy == 0 or iy == n - 1)
-            if is_corner and TILT_DEG != 0:
-                a, b, c = tilted_orientation_toward_center(x, y)
-            else:
-                a, b, c = FIXED_A_DEG, FIXED_B_DEG, FIXED_C_DEG
-            poses.append([float(x), float(y), float(FIXED_Z_MM), float(a), float(b), float(c)])
-    return poses
+    """시작/끝에 사이드뷰 포즈를 덧붙인 전체 스캔 포즈 리스트.
+
+    순서: [시작-사이드뷰] -> [평범한 탑다운 그리드 (첫 포즈=START_POINT)]
+         -> [끝-사이드뷰 (그리드 마지막 포즈=END_POINT 다음)]
+    """
+    start_side = [
+        START_POINT["x"], START_POINT["y"] + SIDE_VIEW_Y_OFFSET_MM,
+        FIXED_Z_MM - SIDE_VIEW_Z_DROP_MM,
+    ] + list(SIDE_VIEW_START_ABC_DEG)
+
+    end_side = [
+        END_POINT["x"], END_POINT["y"] - SIDE_VIEW_Y_OFFSET_MM,
+        FIXED_Z_MM - SIDE_VIEW_Z_DROP_MM,
+    ] + list(SIDE_VIEW_END_ABC_DEG)
+
+    poses = [start_side] + generate_flat_scan_poses() + [end_side]
+    return [[float(v) for v in pose] for pose in poses]
 
 
 # =========================
@@ -287,7 +290,10 @@ def save_record(merged_points, clusters, poses):
         "end_point_xy_mm": END_POINT,
         "x_gap_mm": X_GAP_MM,
         "y_gap_mm": Y_GAP_MM,
-        "tilt_deg": TILT_DEG,
+        "side_view_y_offset_mm": SIDE_VIEW_Y_OFFSET_MM,
+        "side_view_z_drop_mm": SIDE_VIEW_Z_DROP_MM,
+        "side_view_start_abc_deg": SIDE_VIEW_START_ABC_DEG,
+        "side_view_end_abc_deg": SIDE_VIEW_END_ABC_DEG,
         "cluster_eps_m": CLUSTER_EPS_M,
         "cluster_min_points": CLUSTER_MIN_POINTS,
         "scan_poses": poses,
