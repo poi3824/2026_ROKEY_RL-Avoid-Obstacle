@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>obstacle_avoidance_msgs</name>
+  <version>0.0.0</version>
+  <description>rl_avoidance_node / robot_action_node 간 회피 명령 인터페이스</description>
+  <maintainer email="poi3824@gmail.com">soo</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+</package>
