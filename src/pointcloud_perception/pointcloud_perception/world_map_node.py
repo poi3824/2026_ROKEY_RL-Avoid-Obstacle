@@ -303,7 +303,17 @@ def cluster_points(points_xyz, eps=CLUSTER_EPS_M, min_points=CLUSTER_MIN_POINTS)
     return clusters
 
 
-def save_record(merged_points, clusters, poses):
+def save_pose_cloud(out_dir, pose_index, points):
+    if not OPEN3D_AVAILABLE or points.shape[0] == 0:
+        return
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+    o3d.io.write_point_cloud(
+        os.path.join(out_dir, f"scan_pose_{pose_index:03d}_base_roi.ply"), pcd
+    )
+
+
+def save_record(merged_points, clusters, poses, per_pose_points=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = os.path.join(RECORD_DIR, f"world_map_update_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)
@@ -317,6 +327,21 @@ def save_record(merged_points, clusters, poses):
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(merged_points.astype(np.float64))
         o3d.io.write_point_cloud(os.path.join(out_dir, "merged_base_roi.ply"), pcd)
+
+    # 포즈별로 따로 저장 - 어느 포즈가 어긋난 원인인지 하나씩 눈으로 확인할 수 있게
+    # (2026-07-06: 바닥이 여러 겹으로 보이는 문제의 원인 포즈를 찾기 위해 추가).
+    if per_pose_points is not None:
+        for i, (pose, points) in enumerate(zip(poses, per_pose_points)):
+            save_pose_cloud(out_dir, i, points)
+            meta = {
+                "pose_index": i,
+                "pose_xyz_abc": pose,
+                "is_flat_pose": is_flat_pose(pose),
+                "num_points": int(points.shape[0]),
+            }
+            meta_path = os.path.join(out_dir, f"scan_pose_{i:03d}_meta.json")
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
 
     summary = {
         "start_point_xy_mm": START_POINT,
@@ -465,7 +490,7 @@ class ScanWorker(Node):
             raise RuntimeError(f"MoveLine 서비스({MOVE_LINE_SERVICE})를 찾을 수 없습니다.")
 
         poses = generate_scan_poses()
-        merged_list = []
+        per_pose_points = []
 
         for i, pose in enumerate(poses):
             ok = self.move_line(pose)
@@ -477,15 +502,15 @@ class ScanWorker(Node):
             settle_done_time = time.time()
 
             pose_points = self.capture_cloud_at_pose(settle_done_time)
-            if len(pose_points) > 0:
-                merged_list.append(pose_points)
+            per_pose_points.append(pose_points)
 
+        merged_list = [p for p in per_pose_points if len(p) > 0]
         if not merged_list:
-            return np.empty((0, 3), dtype=np.float64), poses
+            return np.empty((0, 3), dtype=np.float64), poses, per_pose_points
 
         merged_points = np.vstack(merged_list)
         merged_points = voxel_downsample(merged_points, VOXEL_SIZE_M)
-        return merged_points, poses
+        return merged_points, poses, per_pose_points
 
 
 # =========================
@@ -506,7 +531,7 @@ class WorldMapNode(Node):
         self.get_logger().info("World map update requested.")
 
         try:
-            merged_points, poses = self.worker.run_scan()
+            merged_points, poses, per_pose_points = self.worker.run_scan()
         except Exception as e:
             self.get_logger().error(f"scan failed: {e}")
             response.success = False
@@ -527,7 +552,7 @@ class WorldMapNode(Node):
             response.message = f"clustering failed: {e}"
             return response
 
-        scan_dir = save_record(merged_points, clusters, poses)
+        scan_dir = save_record(merged_points, clusters, poses, per_pose_points)
 
         msg = build_world_map_update_msg(clusters, scan_dir, self.get_clock().now().to_msg())
         self.obstacle_pub.publish(msg)
