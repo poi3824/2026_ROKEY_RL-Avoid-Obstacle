@@ -72,10 +72,15 @@ SIDE_VIEW_Z_DROP_MM = 30.0    # FIXED_Z_MM에서 이만큼 낮춘다 (정확한 
 SIDE_VIEW_START_ABC_DEG = (98.7, -154.71, -82.0)
 SIDE_VIEW_END_ABC_DEG = (92.3, 142.3, -90.13)
 
-VEL = [20.0, 5.0]
-ACC = [20.0, 5.0]
+VEL = [60.0, 30.0]
+ACC = [60.0, 30.0]
 
 SETTLE_SEC = 0.8
+# 사이드뷰 포즈는 flat 그리드보다 관절이 훨씬 크게 움직여서, 로봇/TF가 완전히
+# 안정되기까지 더 오래 걸린다. 2026-07-06: 바닥이 여러 겹으로 어긋나 보이는
+# 현상 발견 - SETTLE_SEC이 정착 전 프레임을 캡처하게 만들었을 가능성이 있어서
+# 사이드뷰 전용으로 더 길게 잡음 (실측 후 조정 필요, placeholder).
+SIDE_VIEW_SETTLE_SEC = 2.0
 FRAMES_PER_POSE = 1
 VOXEL_SIZE_M = 0.005
 
@@ -160,6 +165,16 @@ def generate_scan_poses():
         poses.append(side_view_pose(x, at_top=ends_at_top))
 
     return [[float(v) for v in pose] for pose in poses]
+
+
+def is_flat_pose(pose):
+    """평범한 탑다운 그리드 포즈인지(True) 사이드뷰 포즈인지(False) 판별."""
+    _, _, _, a, b, c = pose
+    return (
+        abs(a - FIXED_A_DEG) < 1e-6
+        and abs(b - FIXED_B_DEG) < 1e-6
+        and abs(c - FIXED_C_DEG) < 1e-6
+    )
 
 
 # =========================
@@ -295,6 +310,14 @@ def save_record(merged_points, clusters, poses):
 
     np.save(os.path.join(out_dir, "merged_base_roi.npy"), merged_points)
 
+    # cobot_scan/world_map_scan_capture_ranged.py도 .ply를 같이 저장했었다.
+    # publish_saved_world_cloud.py는 .npy만 있으면 되지만, open3d로 .ply를
+    # 직접 읽어서 draw_geometries로 보는 워크플로우도 계속 쓰려면 .ply가 필요하다.
+    if OPEN3D_AVAILABLE and merged_points.shape[0] > 0:
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(merged_points.astype(np.float64))
+        o3d.io.write_point_cloud(os.path.join(out_dir, "merged_base_roi.ply"), pcd)
+
     summary = {
         "start_point_xy_mm": START_POINT,
         "end_point_xy_mm": END_POINT,
@@ -343,7 +366,6 @@ class ScanWorker(Node):
         super().__init__("world_map_scan_worker")
 
         self.latest_cloud_msg = None
-        self.latest_cloud_stamp_key = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -355,7 +377,6 @@ class ScanWorker(Node):
 
     def cloud_callback(self, msg):
         self.latest_cloud_msg = msg
-        self.latest_cloud_stamp_key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
 
     def wait_for_move_line_service(self, timeout_sec=5.0):
         return self.move_line_client.wait_for_service(timeout_sec=timeout_sec)
@@ -388,15 +409,25 @@ class ScanWorker(Node):
             return bool(result.success)
         return True
 
-    def wait_for_new_cloud(self, previous_stamp_key, timeout_sec=5.0):
+    def wait_for_cloud_after(self, after_time_sec, timeout_sec=5.0):
+        """헤더 타임스탬프가 after_time_sec 이후인 point cloud가 올 때까지 대기.
+
+        기존엔 "이전 프레임과 stamp가 다르면 OK"였는데, 그러면 move_line 도중/
+        직후 settle 대기하는 동안 큐(depth 10)에 쌓인 오래된(정착 전) 프레임을
+        그대로 집어올 수 있었다 (2026-07-06, 바닥이 여러 겹으로 어긋나 보이는
+        현상의 원인 후보). settle이 끝난 시각 이후에 찍힌 프레임만 받도록 바꿔서
+        큐에 쌓인 backlog를 건너뛴다.
+        """
         t0 = time.time()
         while time.time() - t0 < timeout_sec:
             rclpy.spin_once(self, timeout_sec=0.1)
-            if self.latest_cloud_msg is None:
+            msg = self.latest_cloud_msg
+            if msg is None:
                 continue
-            if self.latest_cloud_stamp_key != previous_stamp_key:
-                return self.latest_cloud_msg
-        raise TimeoutError("point cloud 수신 타임아웃")
+            stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if stamp_sec >= after_time_sec:
+                return msg
+        raise TimeoutError("settle 이후의 새 point cloud를 받지 못했습니다 (타임아웃).")
 
     def transform_cloud_to_base(self, msg):
         source_frame = msg.header.frame_id
@@ -414,11 +445,12 @@ class ScanWorker(Node):
         xyz_camera = pointcloud_msg_to_xyz(msg)
         return apply_transform(xyz_camera, T)
 
-    def capture_cloud_at_pose(self):
+    def capture_cloud_at_pose(self, settle_done_time):
         collected = []
+        min_stamp = settle_done_time
         for _ in range(FRAMES_PER_POSE):
-            prev_stamp = self.latest_cloud_stamp_key
-            msg = self.wait_for_new_cloud(prev_stamp, timeout_sec=5.0)
+            msg = self.wait_for_cloud_after(min_stamp, timeout_sec=5.0)
+            min_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 + 1e-6
             xyz_base = self.transform_cloud_to_base(msg)
             xyz_roi = crop_roi(xyz_base)
             collected.append(xyz_roi)
@@ -440,8 +472,11 @@ class ScanWorker(Node):
             if not ok:
                 raise RuntimeError(f"MoveLine 실패 (pose {i}: {pose})")
 
-            time.sleep(SETTLE_SEC)
-            pose_points = self.capture_cloud_at_pose()
+            settle_sec = SETTLE_SEC if is_flat_pose(pose) else SIDE_VIEW_SETTLE_SEC
+            time.sleep(settle_sec)
+            settle_done_time = time.time()
+
+            pose_points = self.capture_cloud_at_pose(settle_done_time)
             if len(pose_points) > 0:
                 merged_list.append(pose_points)
 
