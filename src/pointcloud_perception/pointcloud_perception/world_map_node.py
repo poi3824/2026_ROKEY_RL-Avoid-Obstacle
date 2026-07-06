@@ -120,35 +120,45 @@ def generate_scan_columns():
     return columns
 
 
-def generate_flat_scan_poses():
-    """평범한 탑다운 지그재그 그리드 포즈 (틸트 없음)."""
-    poses = []
-    for x, ys in generate_scan_columns():
-        for y in ys:
-            poses.append([
-                float(x), float(y), float(FIXED_Z_MM),
-                float(FIXED_A_DEG), float(FIXED_B_DEG), float(FIXED_C_DEG),
-            ])
-    return poses
+def side_view_pose(x, at_top):
+    """x 위치에서, 스캔 영역의 위쪽(at_top=True) 또는 아래쪽 끝의 사이드뷰 포즈.
+
+    지그재그 특성상 각 column은 항상 START_POINT.y(위) 또는 END_POINT.y(아래)
+    한쪽에서 시작해 반대쪽에서 끝난다. START/END에서 실측한 (오프셋, A,B,C)를
+    그 column의 x 좌표에 그대로 적용한다 (2026-07-06: 공식으로 재계산하는 대신
+    실측값을 재사용하기로 함 - END쪽에서 각도 공식이 실측과 160도 이상 어긋나는
+    걸 확인해서, 중간 지점도 공식보다는 검증된 실측값을 그대로 쓰는 게 안전하다고 판단).
+    """
+    if at_top:
+        y = START_POINT["y"] + SIDE_VIEW_Y_OFFSET_MM
+        abc = SIDE_VIEW_START_ABC_DEG
+    else:
+        y = END_POINT["y"] - SIDE_VIEW_Y_OFFSET_MM
+        abc = SIDE_VIEW_END_ABC_DEG
+    return [x, y, FIXED_Z_MM - SIDE_VIEW_Z_DROP_MM] + list(abc)
 
 
 def generate_scan_poses():
-    """시작/끝에 사이드뷰 포즈를 덧붙인 전체 스캔 포즈 리스트.
+    """모든 column 경계마다 사이드뷰 포즈를 끼워넣은 전체 스캔 포즈 리스트.
 
-    순서: [시작-사이드뷰] -> [평범한 탑다운 그리드 (첫 포즈=START_POINT)]
-         -> [끝-사이드뷰 (그리드 마지막 포즈=END_POINT 다음)]
+    순서: [시작-사이드뷰] -> [column 0 그리드] -> [column 0 끝 사이드뷰]
+         -> [column 1 그리드] -> [column 1 끝 사이드뷰] -> ... -> [마지막 column 끝 사이드뷰]
+
+    짝수 column은 위(START.y)에서 시작해 아래(END.y)에서 끝나고, 홀수 column은
+    그 반대라서, "끝난 지점이 위인지 아래인지"만 보고 어느 사이드뷰 스타일을
+    쓸지 결정하면 전체 경로에 걸쳐 일관되게 적용된다.
     """
-    start_side = [
-        START_POINT["x"], START_POINT["y"] + SIDE_VIEW_Y_OFFSET_MM,
-        FIXED_Z_MM - SIDE_VIEW_Z_DROP_MM,
-    ] + list(SIDE_VIEW_START_ABC_DEG)
+    columns = generate_scan_columns()
 
-    end_side = [
-        END_POINT["x"], END_POINT["y"] - SIDE_VIEW_Y_OFFSET_MM,
-        FIXED_Z_MM - SIDE_VIEW_Z_DROP_MM,
-    ] + list(SIDE_VIEW_END_ABC_DEG)
+    poses = [side_view_pose(columns[0][0], at_top=True)]
 
-    poses = [start_side] + generate_flat_scan_poses() + [end_side]
+    for i, (x, ys) in enumerate(columns):
+        for y in ys:
+            poses.append([x, y, FIXED_Z_MM, FIXED_A_DEG, FIXED_B_DEG, FIXED_C_DEG])
+
+        ends_at_top = (i % 2 == 1)
+        poses.append(side_view_pose(x, at_top=ends_at_top))
+
     return [[float(v) for v in pose] for pose in poses]
 
 
