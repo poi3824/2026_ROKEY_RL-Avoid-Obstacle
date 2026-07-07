@@ -183,11 +183,10 @@ def side_view_pose(x, at_top):
 
 
 def generate_scan_poses():
-    """지그재그 flat scan + column 경계 side view + 마지막 END_POINT side view.
+    """지그재그 flat scan + 시작/중간 column 경계 side view.
 
-    이전 코드도 논리상 마지막 side view를 append했지만, 마지막 END_POINT tilt가
-    실제 로봇에서 안 보인다는 피드백이 있어 최종 side pose를 루프 밖에서 명시적으로
-    한 번 더 구성한다. summary/meta에서도 마지막 pose가 side인지 쉽게 확인할 수 있다.
+    마지막 END_POINT side view는 로봇 물리 한계로 제외한다.
+    따라서 마지막 pose는 flat pose로 끝난다.
     """
     columns = generate_scan_columns()
     poses = []
@@ -199,7 +198,7 @@ def generate_scan_poses():
         for y in ys:
             poses.append([x, y, FIXED_Z_MM, FIXED_A_DEG, FIXED_B_DEG, FIXED_C_DEG])
 
-        # 마지막 column의 side view는 아래에서 별도로 명시적으로 추가한다.
+        # 마지막 column의 side view는 로봇 물리 한계 때문에 추가하지 않는다.
         if i < len(columns) - 1:
             ends_at_top = (i % 2 == 1)
             poses.append(side_view_pose(x, at_top=ends_at_top))
@@ -352,10 +351,13 @@ def estimate_ground_z_mode(points_xyz):
 
 
 def align_ground_z_per_pose(per_pose_points, poses):
-    """포즈별 ground z mode를 공통 기준에 맞춰 z translation만 보정한다.
+    """side-view pose에 대해서만 ground z mode를 기준으로 z translation 보정한다.
 
-    이 보정은 ICP가 아니다. tilt에서 카메라 extrinsic offset 때문에 생기는
-    '바닥 layer 갈라짐'을 줄이기 위한 가벼운 후처리다.
+    주의:
+    - flat/top-down pose는 원래 가장 신뢰도가 높은 기준 map이므로 보정하지 않는다.
+    - 이전 버전은 flat pose까지 z 보정을 적용해서, histogram이 바닥이 아닌 band를
+      ground로 잡는 순간 flat map 자체가 위아래로 틀어질 수 있었다.
+    - 여기서는 flat pose는 기준(reference) 산출에만 쓰고, 실제 z 보정은 side pose에만 적용한다.
     """
     if not ENABLE_GROUND_Z_ALIGNMENT:
         return per_pose_points, {
@@ -392,17 +394,20 @@ def align_ground_z_per_pose(per_pose_points, poses):
     per_pose_info = []
 
     for i, (pose, points, est) in enumerate(zip(poses, per_pose_points, estimates)):
+        pose_is_flat = is_flat_pose(pose)
         info = {
             "pose_index": int(i),
-            "is_flat_pose": bool(is_flat_pose(pose)),
+            "is_flat_pose": bool(pose_is_flat),
             "ground_z_mode": None,
             "ground_bin_count": 0,
             "z_correction_m": 0.0,
             "applied": False,
+            "reason": None,
         }
 
         if est is None or points is None or points.shape[0] == 0:
             corrected_points.append(points)
+            info["reason"] = "no valid ground estimate or empty cloud"
             per_pose_info.append(info)
             continue
 
@@ -413,25 +418,29 @@ def align_ground_z_per_pose(per_pose_points, poses):
         info["ground_bin_count"] = int(est["bin_count"])
         info["z_correction_m"] = dz
 
-        if abs(dz) <= MAX_GROUND_Z_CORRECTION_M:
+        if pose_is_flat:
+            corrected_points.append(points)
+            info["reason"] = "flat pose used as reference only; not corrected"
+        elif abs(dz) <= MAX_GROUND_Z_CORRECTION_M:
             p2 = points.copy()
             p2[:, 2] += dz
             corrected_points.append(p2)
             info["applied"] = True
+            info["reason"] = "side pose corrected"
         else:
-            # 너무 큰 보정은 잘못된 plane을 잡은 것일 수 있으므로 적용하지 않는다.
             corrected_points.append(points)
+            info["reason"] = "correction too large; skipped"
 
         per_pose_info.append(info)
 
     return corrected_points, {
         "enabled": True,
+        "mode": "side_pose_only",
         "reference_source": reference_source,
         "reference_ground_z": reference_ground_z,
         "max_ground_z_correction_m": MAX_GROUND_Z_CORRECTION_M,
         "per_pose": per_pose_info,
     }
-
 
 def cluster_points(points_xyz, eps=CLUSTER_EPS_M, min_points=CLUSTER_MIN_POINTS):
     """DBSCAN으로 point cloud를 군집화해서 장애물 목록을 만든다.
