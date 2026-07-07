@@ -100,11 +100,21 @@ MAX_ICP_DELTA_YAW_DEG = 2.0
 MIN_POINTS_FOR_MAPPING = 3000
 MAX_FLAT_GROUND_Z_DEVIATION_M = 0.025   # reference_ground_z 대비 편차 허용치
 
-# side pose ICP용 overlap 후보 z-band (reference_ground_z 기준 상대값).
-# side cloud 전체를 ICP source로 쓰면 옆면이 flat map(대부분 바닥)에 억지로 끌려갈
-# 수 있어서, 겹칠 가능성이 높은 바닥 근처 밴드만 정합에 쓰고 transform은 전체에 적용한다.
-ICP_SIDE_OVERLAP_Z_MIN_M = -0.03
-ICP_SIDE_OVERLAP_Z_MAX_M = 0.08
+# ground_band_source()가 잘라낸 band가 이 개수보다 적으면 sparse로 본다.
+# 주의: GROUND_Z_MIN_POINTS_IN_BIN(1000)과는 다른 스케일이다 - 그건 raw point cloud
+# (수만 개) 히스토그램용이고, 이건 preprocess_for_mapping()으로 1cm voxel downsample된
+# clean cloud(보통 수백~수천 개) 기준이다. 실측 결과 GROUND_Z_MIN_POINTS_IN_BIN을 그대로
+# 재사용하면 거의 항상 fallback되어(clean 자체가 200~1000개 수준) ground band 제한이
+# 사실상 no-op이 되는 걸 확인함 (2026-07-07).
+ICP_MIN_BAND_POINTS = 100
+
+# ICP correspondence용 ground band (reference_ground_z 기준 상대값).
+# cloud 전체(바닥+장애물)를 그대로 ICP source로 쓰면 장애물 표면에 correspondence가
+# 끌려가 바닥 정합 신호가 흐려진다 (2026-07-07 오프라인 실험에서 z_only/translation_only
+# 모드가 오히려 악화되는 걸 확인). flat-flat, side-flat 정합 모두 이 밴드만 source로
+# 쓰고, 구한 transform은 전체 cloud에 적용한다 (build_map_with_icp 참고).
+ICP_GROUND_BAND_Z_MIN_M = -0.03
+ICP_GROUND_BAND_Z_MAX_M = 0.08
 
 # "z_only" | "translation_only" | "full_se3"
 # 평면 위주 point cloud에 처음부터 full 6DoF를 믿기보다, 오프라인에서 세 모드를
@@ -639,6 +649,25 @@ def align_cloud_to_map_icp(source_np, target_np):
     return aligned_points, report
 
 
+def ground_band_source(clean_points, reference_ground_z):
+    """clean_points(전처리된 좌표)에서 ground band(ICP_GROUND_BAND_Z_*)만 잘라낸다.
+
+    fallback 정책은 호출부(flat/side pass)마다 다르므로 여기서는 순수하게 밴드만
+    잘라서 반환한다 - flat pose는 전체 cloud로 fallback해도 대체로 안전하지만(대부분
+    바닥), side pose는 fallback하면 옆면 전체가 다시 ICP source에 섞여 원래 막으려던
+    문제(옆면이 바닥에 끌려감)가 재발하므로 sparse하면 그냥 스킵해야 한다.
+    """
+    if reference_ground_z is None or clean_points.shape[0] == 0:
+        return clean_points
+
+    z = clean_points[:, 2]
+    mask = (
+        (z >= reference_ground_z + ICP_GROUND_BAND_Z_MIN_M)
+        & (z <= reference_ground_z + ICP_GROUND_BAND_Z_MAX_M)
+    )
+    return clean_points[mask]
+
+
 def build_map_with_icp(per_pose_points, poses, ground_quality):
     """TF로 1차 정렬된 pose cloud를 flat pose 먼저, side pose 나중에 ICP로 지도에 붙인다.
 
@@ -649,6 +678,11 @@ def build_map_with_icp(per_pose_points, poses, ground_quality):
     Pass 2 (side): side cloud 전체를 ICP source로 쓰면 옆면이 flat map(대부분 바닥)에
     억지로 끌려갈 수 있어서, ground 근처 z-band(overlap 후보)만 source로 정합하고
     구한 transform은 side cloud 전체에 적용한다. reject면 해당 side pose는 제외.
+
+    두 pass 모두 ground_band_source()로 correspondence 대상을 ground band로 제한한다 -
+    flat pose도 위에서 내려다본 시야라 장애물 상단이 섞여 있으면 바닥 정합이 흐려질 수
+    있어서, side pose와 동일한 방식을 적용한다 (2026-07-07: 전체 cloud로 정합했을 때
+    z_only/translation_only 모드가 오히려 악화되는 걸 오프라인 실험으로 확인).
 
     ICP correspondence 탐색에는 성긴 preprocess_for_mapping() 결과(누적 map도 이 해상도로
     유지)를 쓰고, 최종 출력에 들어가는 점은 원본 해상도 좌표에 transform만 적용한 값이다.
@@ -692,7 +726,13 @@ def build_map_with_icp(per_pose_points, poses, ground_quality):
             }
             continue
 
-        _, icp_report = align_cloud_to_map_icp(clean, global_map)
+        band_source = ground_band_source(clean, reference_ground_z)
+        if band_source.shape[0] < ICP_MIN_BAND_POINTS:
+            # flat pose는 top-down이라 대부분 바닥이므로, 밴드가 sparse하면
+            # 전체 cloud로 fallback해도 side pose만큼 위험하지 않다.
+            band_source = clean
+
+        _, icp_report = align_cloud_to_map_icp(band_source, global_map)
         T_applied = np.asarray(icp_report["applied_transform"], dtype=np.float64)
 
         if icp_report["accepted"]:
@@ -735,22 +775,19 @@ def build_map_with_icp(per_pose_points, poses, ground_quality):
             continue
 
         clean = preprocess_for_mapping(points)
-        z = clean[:, 2]
-        overlap_mask = (
-            (z >= reference_ground_z + ICP_SIDE_OVERLAP_Z_MIN_M)
-            & (z <= reference_ground_z + ICP_SIDE_OVERLAP_Z_MAX_M)
-        )
-        overlap_source = clean[overlap_mask]
+        band_source = ground_band_source(clean, reference_ground_z)
 
-        if overlap_source.shape[0] < GROUND_Z_MIN_POINTS_IN_BIN:
+        if band_source.shape[0] < ICP_MIN_BAND_POINTS:
+            # side pose는 fallback하면 옆면 전체가 ICP source에 섞여 원래 막으려던
+            # 문제(옆면이 바닥에 끌려감)가 재발하므로, sparse하면 그냥 스킵한다.
             mapping_report[str(i)] = {
                 "type": "side", "quality_gate": None, "icp": None,
                 "used_in_map": False,
-                "reason": f"overlap band too sparse ({overlap_source.shape[0]} points)",
+                "reason": f"ground band too sparse ({band_source.shape[0]} points)",
             }
             continue
 
-        _, icp_report = align_cloud_to_map_icp(overlap_source, global_map)
+        _, icp_report = align_cloud_to_map_icp(band_source, global_map)
 
         if icp_report["accepted"]:
             T_applied = np.asarray(icp_report["applied_transform"], dtype=np.float64)
