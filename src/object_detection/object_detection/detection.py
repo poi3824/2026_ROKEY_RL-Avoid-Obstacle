@@ -12,6 +12,8 @@ from object_detection.yolo import YoloModel
 PACKAGE_NAME = 'object_detection'
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 
+DEPTH_ROI_HALF = 3  # (2*n+1)x(2*n+1) 정사각형 영역에서 median 계산
+
 
 class ObjectDetectionNode(Node):
     def __init__(self, model_name = 'yolo'):
@@ -45,13 +47,18 @@ class ObjectDetectionNode(Node):
         """이미지를 처리해 객체의 카메라 좌표를 계산합니다."""
         rclpy.spin_once(self.img_node)
 
-        box, score = self.model.get_best_detection(self.img_node, target)
-        if box is None or score is None:
-            self.get_logger().warn("No detection found.")
-            return 0.0, 0.0, 0.0
+        if target == "":
+            color = self._wait_for_valid_data(self.img_node.get_color_frame, "color frame")
+            h, w = color.shape[:2]
+            cx, cy = w//2, h//2
+        else:
+            box, score = self.model.get_best_detection(self.img_node, target)
+            if box is None or score is None:
+                self.get_logger().warn(f"No detection for '{target}'")
+                return 0.0, 0.0, 0.0
+            self.get_logger().info(f"Detected: box={box}, score={score:.2f}")
+            cx, cy = map(int, [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
         
-        self.get_logger().info(f"Detection: box={box}, score={score}")
-        cx, cy = map(int, [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
         cz = self._get_depth(cx, cy)
         if cz is None:
             self.get_logger().warn("Depth out of range.")
@@ -60,13 +67,22 @@ class ObjectDetectionNode(Node):
         return self._pixel_to_camera_coords(cx, cy, cz)
 
     def _get_depth(self, x, y):
-        """픽셀 좌표의 depth 값을 안전하게 읽어옵니다."""
+        """(x,y) 주변 ROI에서 유효한(0이 아닌) depth 값들 중 가장 가까운(min) 값을 반환합니다.
+
+        ROI 안에 물체와 배경(바닥 등)이 같이 걸리면 median은 둘 중 어느 쪽이
+        많이 잡히느냐에 따라 값이 튀므로, 항상 가장 가까운 표면(물체 쪽)을
+        고르도록 min을 사용한다.
+        """
         frame = self._wait_for_valid_data(self.img_node.get_depth_frame, "depth frame")
-        try:
-            return frame[y, x]
-        except IndexError:
-            self.get_logger().warn(f"Coordinates ({x},{y}) out of range.")
+        h, w = frame.shape[:2]
+        x0, x1 = max(0, x - DEPTH_ROI_HALF), min(w, x + DEPTH_ROI_HALF + 1)
+        y0, y1 = max(0, y - DEPTH_ROI_HALF), min(h, y + DEPTH_ROI_HALF + 1)
+        roi = frame[y0:y1, x0:x1]
+        valid = roi[roi > 0]
+        if valid.size == 0:
+            self.get_logger().warn(f"No valid depth around ({x},{y}).")
             return None
+        return float(np.min(valid))
 
     def _wait_for_valid_data(self, getter, description):
         """getter 함수가 유효한 데이터를 반환할 때까지 spin 하며 재시도합니다."""

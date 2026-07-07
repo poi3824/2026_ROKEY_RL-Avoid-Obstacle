@@ -7,6 +7,7 @@
 #   response : success(bool), message(string, "object / source / target / return_pos" 형식)
 import os
 import sys
+import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -20,24 +21,25 @@ from od_msg.srv import SrvDepthPosition
 from dsr_msgs2.srv import MoveStop
 from ament_index_python.packages import get_package_share_directory
 
-from my_robot_pkg.onrobot import RG
+from my_robot_pkg.gripper import RG2Gripper
 from my_robot_pkg.motion_executor import MotionExecutor
 
 PACKAGE_PATH = get_package_share_directory("my_robot_pkg")
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
-VELOCITY, ACC = 60, 60
+VELOCITY, ACC = 30, 30
 
-GRIPPER_NAME = "rg2"
 TOOLCHARGER_IP = "192.168.1.1"
 TOOLCHARGER_PORT = "502"
 
 DEPTH_OFFSET = 5
 MIN_DEPTH = 40.0
 
-GET_KEYWORD_TIMEOUT = None  # 웨이크워드 대기 자체가 무한정이라 유한 타임아웃이 안 맞음
+
 GET_TARGET_TIMEOUT = 5.0
+GET_SURFACE_Z_SAMPLES = 5  # 팔이 settle 중이거나 depth가 순간적으로 튀는 프레임을 걸러내기 위한 샘플 수
+GET_SURFACE_Z_SAMPLE_INTERVAL = 0.1  # 샘플 사이 간격(초)
 
 POSITION_COORDS = {
     "home": [417.61, -0.76, 477.45, 174.25, 179.99, -7.65],
@@ -62,7 +64,7 @@ except ImportError as e:
     sys.exit()
 
 home = posx(POSITION_COORDS["home"])
-gripper = RG(GRIPPER_NAME, TOOLCHARGER_IP, TOOLCHARGER_PORT)
+gripper = RG2Gripper(TOOLCHARGER_IP, TOOLCHARGER_PORT)
 
 stop_client = dsr_node.create_client(MoveStop, "motion/move_stop")
 
@@ -73,9 +75,6 @@ def stop(stop_mode=1):
     future = stop_client.call_async(req)
     rclpy.spin_until_future_complete(dsr_node, future, timeout_sec=1.0)
     return future.result()
-
-
-motion = MotionExecutor(movel, movej, mwait, gripper, VELOCITY, ACC, stop)
 
 
 class RobotActionNode(Node):
@@ -92,7 +91,7 @@ class RobotActionNode(Node):
             self.get_logger().info("Waiting for get_3d_position service...")
         self.get_position_request = SrvDepthPosition.Request()
 
-        self.motion = motion
+        self.motion = MotionExecutor(movel, movej, mwait, gripper, VELOCITY, ACC, stop, self.get_surface_z)
         self.robot_init()
 
     def robot_init(self):
@@ -121,7 +120,7 @@ class RobotActionNode(Node):
     def request_keyword(self):
         """/get_keyword 서비스를 호출하고 응답(Trigger.Response)을 반환한다."""
         future = self.get_keyword_client.call_async(self.get_keyword_request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=GET_KEYWORD_TIMEOUT)
+        rclpy.spin_until_future_complete(self, future)
         return future.result()
 
     def execute_robot_action(self, message):
@@ -187,7 +186,9 @@ class RobotActionNode(Node):
 
             self.get_logger().info(f"Moving '{obj}': detected {source_pos} -> {target}")
 
-            self.motion.pick(source_pos)
+            if not self.motion.pick(source_pos):
+                self.get_logger().warn(f"'{obj}' 파지 실패(grip_detected=0), 이번 물체는 건너뜀")
+                continue
             self.motion.place(target_pos)
 
         self.motion.return_home(home)
@@ -222,6 +223,48 @@ class RobotActionNode(Node):
             base_coords[2] = max(base_coords[2], MIN_DEPTH)
 
         return list(base_coords[:3]) + robot_posx[3:]
+
+    def get_surface_z(self):
+        """카메라 중앙 픽셀의 depth를 여러 번 읽어 base 좌표계 z값의 median을 반환한다 (YOLO 미사용).
+
+        팔이 아직 완전히 settle되지 않았거나 depth가 순간적으로 튀는/끊기는
+        프레임 하나 때문에 잘못된 높이로 계산되는 걸 막기 위해, 한 프레임이 아니라
+        GET_SURFACE_Z_SAMPLES번 읽어서 그중 유효한 값들의 median을 쓴다.
+        하나도 유효한 값이 없으면 None을 반환해서 호출부(motion_executor.pick/place)가
+        fallback을 쓰도록 한다.
+        """
+        zs = []
+        for i in range(GET_SURFACE_Z_SAMPLES):
+            z = self._read_surface_z_once()
+            if z is not None:
+                zs.append(z)
+            if i < GET_SURFACE_Z_SAMPLES - 1:
+                time.sleep(GET_SURFACE_Z_SAMPLE_INTERVAL)
+
+        if not zs:
+            self.get_logger().warn("get_surface_z: 유효한 depth 샘플이 하나도 없음")
+            return None
+
+        return float(np.median(zs))
+
+    def _read_surface_z_once(self):
+        """카메라 중앙 픽셀 depth 1회를 읽어 base z로 변환한다. 실패하면 None."""
+        self.get_position_request.target = ""
+        future = self.get_position_client.call_async(self.get_position_request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=GET_TARGET_TIMEOUT)
+
+        result = future.result()
+        if result is None:
+            return None
+
+        camera_coords = result.depth_position.tolist()
+        if sum(camera_coords) == 0:
+            return None
+
+        gripper2cam_path = os.path.join(PACKAGE_PATH, "resource", "T_gripper2camera.npy")
+        robot_posx = get_current_posx()[0]
+        base_coords = self.transform_to_base(camera_coords, gripper2cam_path, robot_posx)
+        return base_coords[2]
 
     def transform_to_base(self, camera_coords, gripper2cam_path, robot_pos):
         """카메라 좌표계 3D 좌표를 로봇 베이스 좌표계로 변환한다."""
