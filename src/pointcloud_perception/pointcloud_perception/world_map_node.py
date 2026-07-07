@@ -29,6 +29,7 @@ import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
+from rclpy.qos import qos_profile_sensor_data
 
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -75,14 +76,48 @@ SIDE_VIEW_END_ABC_DEG = (92.3, 142.3, -90.13)
 VEL = [60.0, 30.0]
 ACC = [60.0, 30.0]
 
-SETTLE_SEC = 0.8
-# 사이드뷰 포즈는 flat 그리드보다 관절이 훨씬 크게 움직여서, 로봇/TF가 완전히
-# 안정되기까지 더 오래 걸린다. 2026-07-06: 바닥이 여러 겹으로 어긋나 보이는
-# 현상 발견 - SETTLE_SEC이 정착 전 프레임을 캡처하게 만들었을 가능성이 있어서
-# 사이드뷰 전용으로 더 길게 잡음 (실측 후 조정 필요, placeholder).
-SIDE_VIEW_SETTLE_SEC = 2.0
+# Doosan MoveLine의 sync_type 의미는 설치된 dsr_msgs2/컨트롤러 버전에 따라 확인 필요.
+# 기존 코드와 동일하게 0을 기본값으로 둔다. 만약 서비스가 "명령 접수 즉시 반환"이면
+# 로봇이 아직 움직이는 중에 cloud를 찍을 수 있으므로 settle/discard를 길게 둔다.
+MOVE_SYNC_TYPE = 0
+
+# flat scan에서도 첫 프레임이 흔들릴 수 있어서 기존 0.8s보다 조금 여유를 둔다.
+SETTLE_SEC = 1.2
+
+# 사이드뷰/tilt 포즈는 그리퍼-카메라 offset 때문에 TCP 자세 변화가 크고,
+# robot TF와 RealSense cloud가 안정되기까지 시간이 더 필요하다.
+SIDE_VIEW_SETTLE_SEC = 3.0
+
+# side -> flat으로 복귀하는 바로 다음 포즈는 특히 stale frame이 잡히기 쉬워서
+# 별도의 settle 시간을 둔다. pose14 -> pose15가 거의 같은 cloud로 저장되는 현상 방지.
+AFTER_SIDE_RETURN_SETTLE_SEC = 3.0
+
+
+# settle 직후 첫 몇 장은 motion/auto-exposure/TF lag가 남을 수 있어 버린다.
+DISCARD_FRAMES_AFTER_SETTLE = 5
+
 FRAMES_PER_POSE = 1
+
+# point cloud / TF 동기화 대기 시간.
+# 중요한 점: point cloud stamp를 ROS 현재 시각과 직접 비교하지 않는다.
+# RealSense header stamp가 ROS clock보다 약간 늦거나 앞설 수 있기 때문이다.
+CLOUD_WAIT_TIMEOUT_SEC = 10.0
+TF_WAIT_TIMEOUT_SEC = 5.0
+
 VOXEL_SIZE_M = 0.005
+
+# =========================
+# 포즈별 ground z 정렬 옵션
+# =========================
+# tilt 시 +Y/-Y 진행 방향에 따라 바닥/테이블 plane이 위아래로 살짝 갈라지는 현상을
+# 완화하기 위한 후처리다. 진짜 hand-eye calibration을 대체하지는 못하지만,
+# map layer를 줄이는 데 가장 직접적으로 효과가 있다.
+ENABLE_GROUND_Z_ALIGNMENT = True
+GROUND_Z_HIST_MIN_M = -0.03
+GROUND_Z_HIST_MAX_M = 0.08
+GROUND_Z_HIST_BIN_M = 0.002
+GROUND_Z_MIN_POINTS_IN_BIN = 1000
+MAX_GROUND_Z_CORRECTION_M = 0.04
 
 ROI_MARGIN_MM = 80.0
 ROI_Z_MIN_M = -0.05
@@ -144,25 +179,26 @@ def side_view_pose(x, at_top):
 
 
 def generate_scan_poses():
-    """모든 column 경계마다 사이드뷰 포즈를 끼워넣은 전체 스캔 포즈 리스트.
+    """지그재그 flat scan + column 경계 side view + 마지막 END_POINT side view.
 
-    순서: [시작-사이드뷰] -> [column 0 그리드] -> [column 0 끝 사이드뷰]
-         -> [column 1 그리드] -> [column 1 끝 사이드뷰] -> ... -> [마지막 column 끝 사이드뷰]
-
-    짝수 column은 위(START.y)에서 시작해 아래(END.y)에서 끝나고, 홀수 column은
-    그 반대라서, "끝난 지점이 위인지 아래인지"만 보고 어느 사이드뷰 스타일을
-    쓸지 결정하면 전체 경로에 걸쳐 일관되게 적용된다.
+    이전 코드도 논리상 마지막 side view를 append했지만, 마지막 END_POINT tilt가
+    실제 로봇에서 안 보인다는 피드백이 있어 최종 side pose를 루프 밖에서 명시적으로
+    한 번 더 구성한다. summary/meta에서도 마지막 pose가 side인지 쉽게 확인할 수 있다.
     """
     columns = generate_scan_columns()
+    poses = []
 
-    poses = [side_view_pose(columns[0][0], at_top=True)]
+    # scan 시작 전 START 쪽 side view
+    poses.append(side_view_pose(columns[0][0], at_top=True))
 
     for i, (x, ys) in enumerate(columns):
         for y in ys:
             poses.append([x, y, FIXED_Z_MM, FIXED_A_DEG, FIXED_B_DEG, FIXED_C_DEG])
 
-        ends_at_top = (i % 2 == 1)
-        poses.append(side_view_pose(x, at_top=ends_at_top))
+        # 마지막 column의 side view는 아래에서 별도로 명시적으로 추가한다.
+        if i < len(columns) - 1:
+            ends_at_top = (i % 2 == 1)
+            poses.append(side_view_pose(x, at_top=ends_at_top))
 
     return [[float(v) for v in pose] for pose in poses]
 
@@ -252,6 +288,10 @@ def crop_roi(points_base):
     return points_base[mask]
 
 
+def msg_stamp_to_sec(stamp_msg):
+    return stamp_msg.sec + stamp_msg.nanosec * 1e-9
+
+
 def pointcloud_msg_to_xyz(msg):
     points = [
         [p[0], p[1], p[2]]
@@ -269,6 +309,124 @@ def voxel_downsample(points_xyz, voxel_size_m):
     pcd.points = o3d.utility.Vector3dVector(points_xyz)
     pcd = pcd.voxel_down_sample(voxel_size_m)
     return np.asarray(pcd.points)
+
+
+def estimate_ground_z_mode(points_xyz):
+    """포즈별 point cloud에서 바닥/테이블로 보이는 z band의 mode를 추정한다.
+
+    RealSense tilt에서 생기는 layer는 대부분 z 방향 bias로 먼저 드러난다.
+    전체 median은 장애물/옆면 point에 끌릴 수 있으므로, 낮은 z 범위에서 histogram
+    peak를 ground 후보로 사용한다.
+    """
+    if points_xyz is None or points_xyz.shape[0] == 0:
+        return None
+
+    z = points_xyz[:, 2]
+    z = z[(z >= GROUND_Z_HIST_MIN_M) & (z <= GROUND_Z_HIST_MAX_M)]
+    if z.size < GROUND_Z_MIN_POINTS_IN_BIN:
+        return None
+
+    bins = np.arange(
+        GROUND_Z_HIST_MIN_M,
+        GROUND_Z_HIST_MAX_M + GROUND_Z_HIST_BIN_M,
+        GROUND_Z_HIST_BIN_M
+    )
+    counts, edges = np.histogram(z, bins=bins)
+    if counts.size == 0:
+        return None
+
+    idx = int(np.argmax(counts))
+    if int(counts[idx]) < GROUND_Z_MIN_POINTS_IN_BIN:
+        return None
+
+    return {
+        "z_mode": float((edges[idx] + edges[idx + 1]) * 0.5),
+        "bin_count": int(counts[idx]),
+        "bin_min": float(edges[idx]),
+        "bin_max": float(edges[idx + 1]),
+    }
+
+
+def align_ground_z_per_pose(per_pose_points, poses):
+    """포즈별 ground z mode를 공통 기준에 맞춰 z translation만 보정한다.
+
+    이 보정은 ICP가 아니다. tilt에서 카메라 extrinsic offset 때문에 생기는
+    '바닥 layer 갈라짐'을 줄이기 위한 가벼운 후처리다.
+    """
+    if not ENABLE_GROUND_Z_ALIGNMENT:
+        return per_pose_points, {
+            "enabled": False,
+            "reason": "ENABLE_GROUND_Z_ALIGNMENT=False",
+            "reference_ground_z": None,
+            "per_pose": [],
+        }
+
+    estimates = [estimate_ground_z_mode(points) for points in per_pose_points]
+
+    flat_ground = [
+        est["z_mode"]
+        for est, pose in zip(estimates, poses)
+        if est is not None and is_flat_pose(pose)
+    ]
+    all_ground = [est["z_mode"] for est in estimates if est is not None]
+
+    if flat_ground:
+        reference_ground_z = float(np.median(flat_ground))
+        reference_source = "flat_pose_median"
+    elif all_ground:
+        reference_ground_z = float(np.median(all_ground))
+        reference_source = "all_pose_median"
+    else:
+        return per_pose_points, {
+            "enabled": False,
+            "reason": "no valid ground z mode",
+            "reference_ground_z": None,
+            "per_pose": [],
+        }
+
+    corrected_points = []
+    per_pose_info = []
+
+    for i, (pose, points, est) in enumerate(zip(poses, per_pose_points, estimates)):
+        info = {
+            "pose_index": int(i),
+            "is_flat_pose": bool(is_flat_pose(pose)),
+            "ground_z_mode": None,
+            "ground_bin_count": 0,
+            "z_correction_m": 0.0,
+            "applied": False,
+        }
+
+        if est is None or points is None or points.shape[0] == 0:
+            corrected_points.append(points)
+            per_pose_info.append(info)
+            continue
+
+        z_mode = float(est["z_mode"])
+        dz = float(reference_ground_z - z_mode)
+
+        info["ground_z_mode"] = z_mode
+        info["ground_bin_count"] = int(est["bin_count"])
+        info["z_correction_m"] = dz
+
+        if abs(dz) <= MAX_GROUND_Z_CORRECTION_M:
+            p2 = points.copy()
+            p2[:, 2] += dz
+            corrected_points.append(p2)
+            info["applied"] = True
+        else:
+            # 너무 큰 보정은 잘못된 plane을 잡은 것일 수 있으므로 적용하지 않는다.
+            corrected_points.append(points)
+
+        per_pose_info.append(info)
+
+    return corrected_points, {
+        "enabled": True,
+        "reference_source": reference_source,
+        "reference_ground_z": reference_ground_z,
+        "max_ground_z_correction_m": MAX_GROUND_Z_CORRECTION_M,
+        "per_pose": per_pose_info,
+    }
 
 
 def cluster_points(points_xyz, eps=CLUSTER_EPS_M, min_points=CLUSTER_MIN_POINTS):
@@ -313,7 +471,7 @@ def save_pose_cloud(out_dir, pose_index, points):
     )
 
 
-def save_record(merged_points, clusters, poses, per_pose_points=None):
+def save_record(merged_points, clusters, poses, per_pose_points=None, ground_z_alignment=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = os.path.join(RECORD_DIR, f"world_map_update_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)
@@ -339,6 +497,8 @@ def save_record(merged_points, clusters, poses, per_pose_points=None):
                 "is_flat_pose": is_flat_pose(pose),
                 "num_points": int(points.shape[0]),
             }
+            if ground_z_alignment and ground_z_alignment.get("per_pose"):
+                meta["ground_z_alignment"] = ground_z_alignment["per_pose"][i]
             meta_path = os.path.join(out_dir, f"scan_pose_{i:03d}_meta.json")
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2)
@@ -354,6 +514,7 @@ def save_record(merged_points, clusters, poses, per_pose_points=None):
         "side_view_end_abc_deg": SIDE_VIEW_END_ABC_DEG,
         "cluster_eps_m": CLUSTER_EPS_M,
         "cluster_min_points": CLUSTER_MIN_POINTS,
+        "ground_z_alignment": ground_z_alignment,
         "scan_poses": poses,
         "clusters": clusters,
     }
@@ -395,8 +556,10 @@ class ScanWorker(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        # RealSense PointCloud2는 센서 스트림이므로 최신 프레임만 쓰는 쪽이 안전하다.
+        # queue가 깊으면 이동/settle 중 쌓인 오래된 프레임을 나중에 잡을 수 있다.
         self.cloud_sub = self.create_subscription(
-            PointCloud2, POINTCLOUD_TOPIC, self.cloud_callback, 10
+            PointCloud2, POINTCLOUD_TOPIC, self.cloud_callback, qos_profile_sensor_data
         )
         self.move_line_client = self.create_client(MoveLine, MOVE_LINE_SERVICE)
 
@@ -421,7 +584,7 @@ class ScanWorker(Node):
         if hasattr(req, "blend_type"):
             req.blend_type = 0
         if hasattr(req, "sync_type"):
-            req.sync_type = 0
+            req.sync_type = int(MOVE_SYNC_TYPE)
 
         future = self.move_line_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
@@ -434,51 +597,155 @@ class ScanWorker(Node):
             return bool(result.success)
         return True
 
-    def wait_for_cloud_after(self, after_time_sec, timeout_sec=5.0):
-        """헤더 타임스탬프가 after_time_sec 이후인 point cloud가 올 때까지 대기.
+    def spin_sleep(self, seconds):
+        """time.sleep 대신 worker node를 계속 spin하면서 대기한다.
 
-        기존엔 "이전 프레임과 stamp가 다르면 OK"였는데, 그러면 move_line 도중/
-        직후 settle 대기하는 동안 큐(depth 10)에 쌓인 오래된(정착 전) 프레임을
-        그대로 집어올 수 있었다 (2026-07-06, 바닥이 여러 겹으로 어긋나 보이는
-        현상의 원인 후보). settle이 끝난 시각 이후에 찍힌 프레임만 받도록 바꿔서
-        큐에 쌓인 backlog를 건너뛴다.
+        TF listener와 point cloud subscriber는 spin이 돌아야 최신 데이터가 들어온다.
+        time.sleep만 쓰면 settle 시간 동안 callback 처리가 멈추고, 이후 오래된 큐를
+        처리하면서 정착 전 프레임/TF를 잡을 수 있다.
+        """
+        end_time = time.time() + float(seconds)
+        while time.time() < end_time:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+    def latest_cloud_stamp_sec(self):
+        """현재 worker가 마지막으로 받은 point cloud stamp를 초 단위로 반환."""
+        if self.latest_cloud_msg is None:
+            return None
+        return msg_stamp_to_sec(self.latest_cloud_msg.header.stamp)
+
+    def wait_for_cloud_newer_than(self, min_stamp_sec=None, timeout_sec=CLOUD_WAIT_TIMEOUT_SEC):
+        """특정 point cloud stamp보다 새로운 프레임이 들어올 때까지 기다린다.
+
+        주의:
+        - ROS 현재 시각(self.get_clock().now())과 cloud header stamp를 비교하지 않는다.
+        - RealSense/robot TF가 같은 system clock을 쓰더라도 publish latency 때문에
+          cloud stamp가 현재 시각보다 늦게 보일 수 있다.
+        - 그래서 "settle 종료 시각 이후"가 아니라 "마지막으로 처리한 cloud stamp 이후"
+          프레임을 잡는 방식으로 바꾼다.
         """
         t0 = time.time()
+        last_seen_stamp = None
+
         while time.time() - t0 < timeout_sec:
-            rclpy.spin_once(self, timeout_sec=0.1)
+            rclpy.spin_once(self, timeout_sec=0.05)
+
             msg = self.latest_cloud_msg
             if msg is None:
                 continue
-            stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            if stamp_sec >= after_time_sec:
+
+            stamp_sec = msg_stamp_to_sec(msg.header.stamp)
+            last_seen_stamp = stamp_sec
+
+            if min_stamp_sec is None or stamp_sec > min_stamp_sec + 1e-9:
                 return msg
-        raise TimeoutError("settle 이후의 새 point cloud를 받지 못했습니다 (타임아웃).")
+
+        if min_stamp_sec is None:
+            raise TimeoutError(
+                f"새 point cloud를 받지 못했습니다. "
+                f"last_seen_stamp={last_seen_stamp}"
+            )
+
+        raise TimeoutError(
+            f"기준 stamp 이후의 새 point cloud를 받지 못했습니다. "
+            f"min_stamp={min_stamp_sec:.6f}, last_seen_stamp={last_seen_stamp}"
+        )
+
+    def discard_cloud_frames(self, count):
+        """settle 직후의 오래된/흔들린 프레임을 버리고 최신 stamp까지 진행한다."""
+        min_stamp = self.latest_cloud_stamp_sec()
+        discarded = 0
+
+        for _ in range(int(count)):
+            msg = self.wait_for_cloud_newer_than(
+                min_stamp,
+                timeout_sec=CLOUD_WAIT_TIMEOUT_SEC
+            )
+            min_stamp = msg_stamp_to_sec(msg.header.stamp)
+            discarded += 1
+
+        return min_stamp, discarded
+
+    def lookup_transform_strict_spin(self, target_frame, source_frame, stamp, timeout_sec=TF_WAIT_TIMEOUT_SEC):
+        """정확한 stamp의 TF가 들어올 때까지 worker node를 spin하면서 기다린다.
+
+        lookup_transform(..., timeout=...)만 쓰면 같은 노드의 TF callback이 처리되지 않는
+        구간이 생길 수 있다. 특히 RealSense cloud stamp가 최신 TF보다 30~80ms 앞서면
+        "extrapolation into the future"가 발생한다. 여기서는 최신 TF fallback은 하지 않고,
+        요청 stamp를 커버하는 TF가 buffer에 들어올 때까지 spin_once로 기다린다.
+        """
+        start = time.time()
+        last_error = None
+
+        while time.time() - start < timeout_sec:
+            try:
+                return self.tf_buffer.lookup_transform(
+                    target_frame,
+                    source_frame,
+                    stamp,
+                    timeout=Duration(seconds=0.0)
+                )
+            except Exception as e:
+                last_error = e
+                rclpy.spin_once(self, timeout_sec=0.02)
+
+        requested_sec = stamp.nanoseconds * 1e-9
+        raise RuntimeError(
+            f"TF lookup failed after {timeout_sec:.1f}s: "
+            f"{source_frame} -> {target_frame} at {requested_sec:.6f}. "
+            f"last_error={last_error}"
+        )
 
     def transform_cloud_to_base(self, msg):
+        """PointCloud2를 msg.header.stamp 시점의 TF로 base_link 기준 변환한다.
+
+        중요:
+        - Time() 최신 TF fallback은 쓰지 않는다.
+        - 대신 point cloud stamp를 커버하는 TF가 들어올 때까지 spin하면서 기다린다.
+        - 그래도 TF가 안 들어오면 scan fail로 드러내서 잘못된 map 누적을 막는다.
+        """
         source_frame = msg.header.frame_id
-        try:
-            stamp = Time.from_msg(msg.header.stamp)
-            tf = self.tf_buffer.lookup_transform(
-                TARGET_FRAME, source_frame, stamp, timeout=Duration(seconds=1.0)
-            )
-        except Exception:
-            tf = self.tf_buffer.lookup_transform(
-                TARGET_FRAME, source_frame, Time(), timeout=Duration(seconds=1.0)
-            )
+        stamp = Time.from_msg(msg.header.stamp)
+
+        tf = self.lookup_transform_strict_spin(
+            TARGET_FRAME,
+            source_frame,
+            stamp,
+            timeout_sec=TF_WAIT_TIMEOUT_SEC
+        )
 
         T = transform_to_matrix(tf)
         xyz_camera = pointcloud_msg_to_xyz(msg)
         return apply_transform(xyz_camera, T)
 
-    def capture_cloud_at_pose(self, settle_done_time):
+    def capture_cloud_at_pose(self):
+        """현재 포즈에서 point cloud를 수집한다.
+
+        settle 직후에는 아직 motion/TF/RealSense exposure가 완전히 안정되지 않은 프레임이
+        들어올 수 있으므로, 먼저 DISCARD_FRAMES_AFTER_SETTLE장 버리고 그 다음 프레임을 쓴다.
+        """
         collected = []
-        min_stamp = settle_done_time
-        for _ in range(FRAMES_PER_POSE):
-            msg = self.wait_for_cloud_after(min_stamp, timeout_sec=5.0)
-            min_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 + 1e-6
+
+        min_stamp, discarded = self.discard_cloud_frames(DISCARD_FRAMES_AFTER_SETTLE)
+        self.get_logger().debug(
+            f"discarded {discarded} frames after settle, stamp={min_stamp}"
+        )
+
+        for frame_idx in range(FRAMES_PER_POSE):
+            msg = self.wait_for_cloud_newer_than(
+                min_stamp,
+                timeout_sec=CLOUD_WAIT_TIMEOUT_SEC
+            )
+            min_stamp = msg_stamp_to_sec(msg.header.stamp)
+
             xyz_base = self.transform_cloud_to_base(msg)
             xyz_roi = crop_roi(xyz_base)
             collected.append(xyz_roi)
+
+            self.get_logger().debug(
+                f"captured frame {frame_idx}: stamp={min_stamp:.6f}, "
+                f"roi_points={xyz_roi.shape[0]}"
+            )
 
         if not collected:
             return np.empty((0, 3), dtype=np.float64)
@@ -491,26 +758,88 @@ class ScanWorker(Node):
 
         poses = generate_scan_poses()
         per_pose_points = []
+        prev_pose = None
 
         for i, pose in enumerate(poses):
+            pose_type = "flat" if is_flat_pose(pose) else "side"
+
+            self.get_logger().info(
+                f"moving pose {i:03d}/{len(poses)-1:03d}: "
+                f"type={pose_type}, "
+                f"pose={['%.2f' % v for v in pose]}"
+            )
+
             ok = self.move_line(pose)
             if not ok:
                 raise RuntimeError(f"MoveLine 실패 (pose {i}: {pose})")
 
             settle_sec = SETTLE_SEC if is_flat_pose(pose) else SIDE_VIEW_SETTLE_SEC
-            time.sleep(settle_sec)
-            settle_done_time = time.time()
 
-            pose_points = self.capture_cloud_at_pose(settle_done_time)
+            # side view 직후 flat 복귀 pose는 stale side frame이 잡히는 경우가 있어 추가 대기.
+            if prev_pose is not None and (not is_flat_pose(prev_pose)) and is_flat_pose(pose):
+                settle_sec = max(settle_sec, AFTER_SIDE_RETURN_SETTLE_SEC)
+
+
+            self.get_logger().info(
+                f"pose {i:03d}/{len(poses)-1:03d} reached candidate: "
+                f"type={pose_type}, settle={settle_sec:.2f}s"
+            )
+
+            # time.sleep 대신 spin_sleep을 사용해서 settle 중에도 TF/cloud callback을 처리한다.
+            # 이 시간 동안 latest_cloud_msg도 계속 최신 프레임으로 갱신된다.
+            self.spin_sleep(settle_sec)
+
+            before_capture_stamp = self.latest_cloud_stamp_sec()
+            if before_capture_stamp is None:
+                self.get_logger().warn(
+                    f"pose {i:03d}: settle 동안 point cloud를 아직 한 번도 받지 못함"
+                )
+            else:
+                self.get_logger().info(
+                    f"pose {i:03d}: latest cloud before capture stamp="
+                    f"{before_capture_stamp:.6f}"
+                )
+
+            pose_points = self.capture_cloud_at_pose()
+            self.get_logger().info(
+                f"pose {i:03d} captured {pose_points.shape[0]} ROI points"
+            )
             per_pose_points.append(pose_points)
+            prev_pose = pose
 
-        merged_list = [p for p in per_pose_points if len(p) > 0]
+        corrected_per_pose_points, ground_z_alignment = align_ground_z_per_pose(
+            per_pose_points, poses
+        )
+
+        if ground_z_alignment.get("enabled"):
+            ref_z = ground_z_alignment.get("reference_ground_z")
+            self.get_logger().info(
+                f"ground z alignment enabled: reference z={ref_z:.4f} m"
+            )
+            for info in ground_z_alignment.get("per_pose", []):
+                if info.get("applied") and abs(info.get("z_correction_m", 0.0)) > 0.003:
+                    self.get_logger().info(
+                        f"pose {info['pose_index']:03d}: "
+                        f"ground_z={info['ground_z_mode']:.4f}, "
+                        f"z_correction={info['z_correction_m']:+.4f} m"
+                    )
+        else:
+            self.get_logger().warn(
+                f"ground z alignment disabled: {ground_z_alignment.get('reason')}"
+            )
+
+        merged_list = [p for p in corrected_per_pose_points if len(p) > 0]
         if not merged_list:
-            return np.empty((0, 3), dtype=np.float64), poses, per_pose_points
+            return (
+                np.empty((0, 3), dtype=np.float64),
+                poses,
+                corrected_per_pose_points,
+                ground_z_alignment,
+            )
 
         merged_points = np.vstack(merged_list)
         merged_points = voxel_downsample(merged_points, VOXEL_SIZE_M)
-        return merged_points, poses, per_pose_points
+        return merged_points, poses, corrected_per_pose_points, ground_z_alignment
 
 
 # =========================
@@ -531,7 +860,7 @@ class WorldMapNode(Node):
         self.get_logger().info("World map update requested.")
 
         try:
-            merged_points, poses, per_pose_points = self.worker.run_scan()
+            merged_points, poses, per_pose_points, ground_z_alignment = self.worker.run_scan()
         except Exception as e:
             self.get_logger().error(f"scan failed: {e}")
             response.success = False
@@ -552,7 +881,7 @@ class WorldMapNode(Node):
             response.message = f"clustering failed: {e}"
             return response
 
-        scan_dir = save_record(merged_points, clusters, poses, per_pose_points)
+        scan_dir = save_record(merged_points, clusters, poses, per_pose_points, ground_z_alignment)
 
         msg = build_world_map_update_msg(clusters, scan_dir, self.get_clock().now().to_msg())
         self.obstacle_pub.publish(msg)
