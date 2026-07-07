@@ -46,6 +46,24 @@ class YoloModel:
         print("%d frames captured", len(frames))
         return list(frames.values())
 
+    def has_label(self, frame, target, confidence_threshold=0.5):
+        """단일 프레임 1장만으로 target 라벨이 있는지 빠르게 확인한다 (True/False).
+
+        2026-07-07: hand 안전 감지용. get_best_detection은 pick 신뢰도를 위해
+        ~1초짜리 멀티프레임 융합을 쓰는데, 안전 감지는 그 정도 견고함보다
+        반응 속도가 중요하고, pick이 쓰는 자원(락/서비스)과 경합하면 안 되므로
+        여기서는 프레임 1장만 돌리는 훨씬 가벼운 경로를 따로 둔다.
+        """
+        if frame is None:
+            return False
+        label_id = self.reversed_class_dict[target]
+        results = self.model([frame], verbose=False)
+        for res in results:
+            for score, label in zip(res.boxes.conf.tolist(), res.boxes.cls.tolist()):
+                if int(label) == label_id and score >= confidence_threshold:
+                    return True
+        return False
+
     def get_best_detection(self, img_node, target):
         rclpy.spin_once(img_node)
         frames = self.get_frames(img_node)

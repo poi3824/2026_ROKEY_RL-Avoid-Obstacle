@@ -4,6 +4,7 @@ Register map (OnRobot RG protocol):
   0: target force (1/10 N)
   1: target width (1/10 mm)
   2: control        1(0x0001)=grip, 8(0x0008)=stop, 16(0x0010)=grip_w_offset
+  267: actual width (1/10 mm) — 핑거팁 오프셋 미포함, 손가락 안쪽 기준 실측 너비
   268: status       bit 0 = busy          — 1 while motion ongoing, 0 when done
                     bit 1 = grip_detected — 1 when object gripped
 """
@@ -12,6 +13,7 @@ import struct
 import time
 
 _MODBUS_UNIT = 65
+_WIDTH_REG = 267
 _STATUS_REG = 268
 _CONTROL_ADDR = 0
 
@@ -81,6 +83,13 @@ class RG2Gripper:
             return None, None
         status = regs[0]
         return bool(status & 0x01), bool(status & 0x02)
+
+    def get_width(self):
+        """레지스터 267을 읽어 손가락 사이 실제 너비(mm)를 반환한다. 읽기 실패 시 None."""
+        regs = self._read_holding_registers(_WIDTH_REG, 1)
+        if regs is None:
+            return None
+        return regs[0] / 10.0
 
     def _command(self, force_val, width_val):
         return self._write_multiple_registers(_CONTROL_ADDR, [force_val, width_val, 16])

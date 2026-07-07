@@ -5,6 +5,19 @@
 #
 # 나중에 장애물 회피(rl_avoidance_node)가 붙으면, 이동(transit) 구간의
 # move_linear를 /avoidance_cmd 반영 버전으로 바꾸는 지점이 이 클래스가 된다.
+#
+# 2026-07: move_linear는 movel(동기)이 아니라 amovel(비동기)을 주입받아 쓴다.
+# DSR_ROBOT2 소스 확인 결과 movel/amovel은 컨트롤러로 보내는 sync_type 값만 다르고,
+# movel(sync_type=0)은 로봇이 물리적으로 멈출 때까지 서비스 응답 자체가 안 돌아와서
+# 그동안 dsr_node가 spin되지 않는다 — 그 사이 들어온 /emergency_stop 요청이
+# 로봇이 멈추고 나서야 처리된다는 뜻. amovel(sync_type=1)은 명령을 큐잉만 하고
+# 바로 리턴하므로, 그 뒤 check_motion()을 짧은 간격으로 폴링하면서 dsr_node에
+# spin 기회를 자주 줘서 응급 정지 요청이 이동 도중에도 즉시 처리되게 한다.
+import contextlib
+import time
+
+_DR_STATE_IDLE = 0  # DSR_ROBOT2.DR_STATE_IDLE과 동일 (check_motion()이 이 값이면 정지 상태)
+MOTION_POLL_INTERVAL = 0.05  # check_motion() 폴링 간격(초)
 
 GRIPPER_TIMEOUT_SEC = 3.0  # 그리퍼 모션(busy bit 해제) 대기 타임아웃
 PLACE_CLEARANCE = 10.0  # 표면 위 여유 간격(mm), 그리퍼가 바닥/테이블에 닿기 직전까지만 내려가게
@@ -13,10 +26,28 @@ PICK_HOVER_HEIGHT = 100.0  # depth를 읽을 안전 hover 높이(mm). source_pos
                             # 엉뚱한 지점을 읽어서, place처럼 좀 떨어진 높이에서 먼저 읽는다.
 PICK_CLEARANCE = 10.0  # 물체 표면 위 여유 간격(mm)
 
+DEFAULT_GRIP_MIN_WIDTH = 30.0  # mm. 통이 바뀌면 이 fallback이 아니라 robot_action_node의
+                                # ~grip_min_width_mm 파라미터를 바꿔서 대응한다 (재빌드 불필요).
+PICK_MAX_ATTEMPTS = 3  # 최초 시도 + 재시도 2회
+
+# 2026-07-07: 손 감지 일시정지는 stop_mode=1(QSTOP, Category 2)을 쓴다.
+# emergency_stop의 stop_mode=0(QSTOP_STO)과 달리 서보 토크를 유지하므로,
+# 손이 치워지면 같은 목적지로 movel을 다시 issue하는 것만으로 재개할 수 있다.
+HAND_PAUSE_STOP_MODE = 1
+
+
+class EmergencyStop(Exception):
+    """move_linear가 폴링 도중 응급 정지 요청을 감지하면 발생시킨다."""
+
 
 class MotionExecutor:
-    def __init__(self, movel, movej, mwait, gripper, velocity, acc, stop, get_surface_z=None):
-        self._movel = movel
+    def __init__(
+        self, movel, movej, mwait, gripper, velocity, acc, stop,
+        get_surface_z=None, redetect=None, grip_min_width=None, logger=None,
+        check_motion=None, estop_event=None, hand_pause_event=None,
+        dsr_lock=None,
+    ):
+        self._movel = movel  # amovel을 주입받는다 (위 모듈 주석 참고)
         self._movej = movej
         self._mwait = mwait
         self.gripper = gripper
@@ -28,10 +59,66 @@ class MotionExecutor:
         # 만들어서 movel/movej/mwait와 같은 방식으로 주입한다.
         self._stop = stop
         self.get_surface_z = get_surface_z  # object_detection/detection.py의 get_surface_z()를 주입받음
+        self.redetect = redetect  # robot_action_node.get_target_pos(label)을 주입받음 (pick 재시도용)
+        # 통 크기가 바뀌면 코드를 고치지 않고 ROS 파라미터로 조정할 수 있도록 주입받는다.
+        self.grip_min_width = grip_min_width if grip_min_width is not None else DEFAULT_GRIP_MIN_WIDTH
+        self.logger = logger  # pick_logger.PickLogger를 주입받음 (없으면 기록 생략)
+        self._check_motion = check_motion  # DSR_ROBOT2.check_motion을 주입받음
+        self._estop_event = estop_event  # robot_action_node의 threading.Event를 주입받음
+        # 2026-07-07: object_detection_node가 /hand_detected 토픽으로 발행하는 걸
+        # robot_action_node가 구독해서 세팅/해제하는 이벤트. move_linear는 그냥
+        # 이 값만 폴링한다.
+        self._hand_pause_event = hand_pause_event
+        # amovel/check_motion/stop이 전부 dsr_node를 spin하므로, 동시 호출을
+        # 막기 위해 이 락으로 감싼다.
+        self._dsr_lock = dsr_lock if dsr_lock is not None else contextlib.nullcontext()
 
     def move_linear(self, posx):
-        self._movel(posx, self.velocity, self.acc)
-        self._mwait()
+        """amovel로 이동 명령을 큐잉하고, check_motion()을 폴링하며 완료를 기다린다.
+
+        폴링 간격마다 dsr_node가 spin될 기회를 주기 때문에, 그 사이 들어온
+        /emergency_stop 요청이 이 함수가 리턴하기 전에 처리될 수 있다. 응급 정지가
+        감지되면 즉시 stop()을 호출하고 EmergencyStop을 발생시켜 pick/place/heard의
+        나머지 단계를 중단시킨다.
+
+        폴링 도중 hand_pause_event가 세팅되면(작업 공간에 손 감지) stop_mode=1로
+        일시정지하고, 이벤트가 풀릴 때까지 기다렸다가 같은 posx로 movel을 다시
+        issue해서 이동을 재개한다 — 응급 정지와 달리 여기서 함수가 끝나지 않는다.
+        """
+        # self._stop은 (robot_action_node.stop) 자체적으로 dsr_lock을 잡으므로
+        # 여기서는 self._movel/self._check_motion 호출만 감싼다 — self._stop
+        # 호출을 dsr_lock 안에서 또 감싸면 non-reentrant lock이라 데드락난다.
+        with self._dsr_lock:
+            self._movel(posx, self.velocity, self.acc)
+
+        if self._check_motion is None:
+            # check_motion이 주입되지 않은 경우(테스트 등) 기존처럼 mwait로 대기.
+            self._mwait()
+            return
+
+        while True:
+            with self._dsr_lock:
+                motion_state = self._check_motion()
+            if motion_state == _DR_STATE_IDLE:
+                break
+
+            if self._estop_event is not None and self._estop_event.is_set():
+                self._stop()
+                raise EmergencyStop("이동 중 응급 정지 감지")
+
+            if self._hand_pause_event is not None and self._hand_pause_event.is_set():
+                self._stop(HAND_PAUSE_STOP_MODE)
+                while self._hand_pause_event.is_set():
+                    if self._estop_event is not None and self._estop_event.is_set():
+                        raise EmergencyStop("일시정지 중 응급 정지 감지")
+                    time.sleep(MOTION_POLL_INTERVAL)
+                with self._dsr_lock:
+                    self._movel(posx, self.velocity, self.acc)  # 같은 목적지로 재개
+
+            time.sleep(MOTION_POLL_INTERVAL)
+
+        if self._estop_event is not None and self._estop_event.is_set():
+            raise EmergencyStop("이동 중 응급 정지 감지")
 
     def wait(self, seconds=None):
         if seconds is None:
@@ -56,7 +143,7 @@ class MotionExecutor:
         self.move_linear(scan_pos)
         self.wait()
 
-    def pick(self, source_pos):
+    def pick(self, source_pos, obj_label=None):
         """source_pos 위 안전 hover 높이에서 depth를 확인하고 내려가 집는다.
 
         place와 동일한 패턴: 물체 바로 옆(source_pos)이 아니라 PICK_HOVER_HEIGHT만큼
@@ -64,32 +151,62 @@ class MotionExecutor:
         카메라-그리퍼 오프셋으로 엉뚱한 지점을 읽는 문제를 피할 수 있다.
         surface_z를 못 구하면(카메라 문제 등) source_pos 그대로 잡는다.
 
+        grip_detected 비트만으로는 빈 채로 오검출될 수 있어, 그리퍼가 닫힌 뒤
+        실제 너비(레지스터 267)도 같이 확인한다. self.grip_min_width(통 크기에 맞춰
+        robot_action_node의 ~grip_min_width_mm 파라미터로 조정) 밑으로 닫혔으면
+        아무것도 안 잡힌 것으로 보고 재시도한다 — 다시 hover로 올라가 obj_label로
+        카메라 재탐지 후 그 좌표로 다시 내려간다. redetect가 없거나 재탐지에
+        실패하면 같은 source_pos로 재시도한다.
+
         Returns:
-            bool: 그리퍼 status register의 grip_detected 비트로 확인한
-            실제 파지 성공 여부. False면 그리퍼를 도로 열고 리턴한다
+            bool: 실제 파지 성공 여부(모션 완료 + grip_detected + 너비 확인).
+            PICK_MAX_ATTEMPTS번 다 실패하면 그리퍼를 열어둔 채 False를 반환한다
             (빈 그리퍼로 옮기는 것을 막기 위함).
         """
-        hover_pos = source_pos[:2] + [source_pos[2] + PICK_HOVER_HEIGHT] + source_pos[3:]
-        self.move_linear(hover_pos)
-        self.wait()
+        for attempt in range(PICK_MAX_ATTEMPTS):
+            hover_pos = source_pos[:2] + [source_pos[2] + PICK_HOVER_HEIGHT] + source_pos[3:]
+            self.move_linear(hover_pos)
+            self.wait()
 
-        surface_z = self.get_surface_z() if self.get_surface_z else None
-        if surface_z is not None:
-            down_pos = source_pos[:2] + [surface_z + PICK_CLEARANCE] + source_pos[3:]
-        else:
-            down_pos = source_pos
+            surface_z = self.get_surface_z() if self.get_surface_z else None
+            if surface_z is not None:
+                down_pos = source_pos[:2] + [surface_z + PICK_CLEARANCE] + source_pos[3:]
+            else:
+                down_pos = source_pos
 
-        self.move_linear(down_pos)
-        self.gripper.close_gripper()
-        motion_done, grip_detected = self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
+            self.move_linear(down_pos)
+            self.gripper.close_gripper()
+            motion_done, grip_detected = self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
+            width = self.gripper.get_width()
+            width_ok = width is None or width >= self.grip_min_width
+            success = bool(motion_done and grip_detected and width_ok)
 
-        if not motion_done or not grip_detected:
+            if self.logger:
+                self.logger.log_attempt(
+                    obj_label, attempt + 1, surface_z, width, grip_detected, motion_done, success,
+                )
+
+            if success:
+                self.move_linear(hover_pos)
+                return True
+
+            print(
+                f"[MotionExecutor] pick 실패 (attempt {attempt + 1}/{PICK_MAX_ATTEMPTS}): "
+                f"motion_done={motion_done} grip_detected={grip_detected} width={width}"
+            )
             self.gripper.open_gripper()
             self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
-            return False
+            self.move_linear(hover_pos)
 
-        self.move_linear(hover_pos)
-        return True
+            if attempt == PICK_MAX_ATTEMPTS - 1:
+                return False
+
+            if self.redetect and obj_label:
+                redetected_pos = self.redetect(obj_label)
+                if redetected_pos is not None:
+                    source_pos = redetected_pos
+
+        return False
 
     def place(self, target_pos):
         """target_pos 위로 이동한 뒤, 카메라 depth로 표면 위치를 확인해 내려놓고 그리퍼를 연다.

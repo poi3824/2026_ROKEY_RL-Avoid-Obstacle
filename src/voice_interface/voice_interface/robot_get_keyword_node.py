@@ -1,6 +1,8 @@
 # ros2 service call /get_keyword std_srvs/srv/Trigger "{}"
 
 import os
+import threading
+
 import rclpy
 import pyaudio
 from rclpy.node import Node
@@ -35,6 +37,20 @@ RESOURCE_PATH = os.path.join(PACKAGE_PATH, "resource")
 ENV_PATH = os.path.join(RESOURCE_PATH, ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 openai_api_key = os.getenv("OPENAI_API_KEY")
+
+# 2026-07-06: robot_action_node가 pick/place로 바쁜 동안에는 get_keyword 서비스가
+# 호출되지 않아서, 그동안 웨이크워드/STT가 전혀 안 돌고 있었다 (음성으로 "정지"를
+# 말해도 아무도 듣고 있지 않은 상태였음). 그래서 듣는 루프를 서비스 콜백 밖으로
+# 빼서 항상 도는 백그라운드 스레드로 만들고, "정지"류는 로봇이 뭘 하고 있든
+# robot_action_node를 거치지 않고 바로 emergency_stop 서비스를 호출하게 했다.
+#
+# robot_action_node.py의 dsr_node가 namespace="dsr01"(ROBOT_ID)로 떠 있어서,
+# 거기 등록된 /emergency_stop의 실제 전체 이름은 /dsr01/emergency_stop이다.
+# ROBOT_ID를 바꾸면 여기도 같이 바꿔야 한다.
+EMERGENCY_STOP_SERVICE = "/dsr01/emergency_stop"
+
+# STT 텍스트에 이 단어가 있으면 LLM 왕복을 기다리지 않고 바로 응급정지를 호출한다.
+STOP_KEYWORDS = ("정지", "멈춰", "스톱", "중지", "그만")
 
 ############ AI Processor ############
 # class AIProcessor:
@@ -212,14 +228,97 @@ STOP / STOP / STOP / STOP
             buffer_size=24000,
         )
         self.mic_controller = MicController(config=mic_config)
+        self.wakeup_word = WakeupWord(mic_config.buffer_size)
         # self.ai_processor = AIProcessor()
+
+        self.emergency_stop_client = self.create_client(Trigger, EMERGENCY_STOP_SERVICE)
+
+        # 2026-07-06: 백그라운드 리스닝 스레드(_listen_loop)와 get_keyword() 서비스
+        # 콜백이 공유하는 상태. _listen_loop가 파싱한 최신 명령을 여기 넣어두면
+        # get_keyword()가 그걸 꺼내서 응답으로 돌려준다.
+        self._lock = threading.Lock()
+        self._latest_command = None
+        self._command_ready = threading.Event()
 
         self.get_logger().info("MicRecorderNode initialized.")
         self.get_logger().info("wait for client's request...")
         self.get_keyword_srv = self.create_service(
             Trigger, "get_keyword", self.get_keyword
         )
-        self.wakeup_word = WakeupWord(mic_config.buffer_size)
+
+        # 2026-07-06: get_keyword 서비스 호출 여부와 무관하게 항상 듣는다.
+        # daemon=True라서 노드가 죽으면 스레드도 같이 정리된다.
+        self._listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
+        self._listen_thread.start()
+
+    def _listen_loop(self):
+        """2026-07-06: 웨이크워드 → 녹음 → STT를 무한 반복한다.
+
+        get_keyword() 호출 여부와 무관하게 항상 돈다. STOP류가 감지되면
+        robot_action_node를 거치지 않고 여기서 바로 emergency_stop을 호출하고,
+        일반 명령은 self._latest_command에 저장해 get_keyword()가 꺼내가게 한다.
+        """
+        try:
+            print("open stream")
+            self.mic_controller.open_stream()
+            self.wakeup_word.set_stream(self.mic_controller.stream)
+        except OSError:
+            self.get_logger().error("Error: Failed to open audio stream")
+            self.get_logger().error("please check your device index")
+            return
+
+        while rclpy.ok():
+            while not self.wakeup_word.is_wakeup():
+                pass
+
+            # STT --> Keyword Extract --> Embedding
+            output_message = self.stt.speech2text()
+
+            if any(word in output_message for word in STOP_KEYWORDS):
+                self.get_logger().warn(f"정지 키워드 감지(로컬): '{output_message}' -> 응급정지 호출")
+                self._call_emergency_stop()
+                continue
+
+            obj, source, target, return_pos = self.extract_keyword(output_message)
+
+            # extract_keyword가 파싱에 실패해 None을 반환한 경우 방어 처리
+            # (원래 코드는 이 경우에도 " ".join(keyword)를 호출해 TypeError가 발생했음)
+            if obj is None:
+                self.get_logger().error("Failed to extract keyword from LLM response")
+                continue
+
+            if "STOP" in obj:  # LLM이 STOP으로 파싱한 경우에 대한 2차 방어
+                self.get_logger().warn("정지 키워드 감지(LLM) -> 응급정지 호출")
+                self._call_emergency_stop()
+                continue
+
+            # obj, source, target, return_pos는 각각 리스트이므로
+            # " ".join(keyword)처럼 튜플을 바로 join하면
+            # 각 원소가 str이 아닌 list라 TypeError가 발생한다.
+            # 따라서 모든 리스트를 하나의 문자열 리스트로 평탄화(flatten)한 뒤 join한다.
+            keyword_str = (
+                f"{' '.join(obj)} / "
+                f"{' '.join(source)} / "
+                f"{' '.join(target)} / "
+                f"{' '.join(return_pos)}"
+            )
+
+            self.get_logger().warn(f"Detected tools: {keyword_str}")
+
+            with self._lock:
+                self._latest_command = keyword_str
+            self._command_ready.set()
+
+    def _call_emergency_stop(self):
+        """2026-07-06: /dsr01/emergency_stop을 fire-and-forget으로 호출한다.
+
+        이 스레드는 rclpy.spin()을 직접 돌리지 않으므로 응답을 기다리지 않는다 —
+        main()에서 도는 rclpy.spin(node)가 알아서 future를 처리한다.
+        """
+        if not self.emergency_stop_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error(f"{EMERGENCY_STOP_SERVICE} 서비스가 아직 안 떠 있음")
+            return
+        self.emergency_stop_client.call_async(Trigger.Request())
 
     def extract_keyword(self, output_message):
         response = self.lang_chain.invoke({"user_input": output_message})
@@ -247,49 +346,21 @@ STOP / STOP / STOP / STOP
 
         return obj, source, target, return_pos
 
-    def get_keyword(self, request, response):  # 요청과 응답 객체를 받아야 함    # d2 이 함수 일부 수정함
-        try:
-            print("open stream")
-            self.mic_controller.open_stream()
-            self.wakeup_word.set_stream(self.mic_controller.stream)
-        except OSError:
-            self.get_logger().error("Error: Failed to open audio stream")
-            self.get_logger().error("please check your device index")
-            response.success = False
-            response.message = "Failed to open audio stream"
-            return response
+    def get_keyword(self, request, response):
+        """2026-07-06: 여기서 직접 녹음/STT를 하지 않는다.
 
-        while not self.wakeup_word.is_wakeup():
-            pass
+        _listen_loop가 항상 백그라운드에서 듣고 있다가 만들어둔 최신 명령이
+        준비될 때까지(threading.Event) 기다렸다가 그걸 꺼내서 응답으로 돌려준다.
+        """
+        self._command_ready.wait()
 
-        # STT --> Keyword Extract --> Embedding
-        output_message = self.stt.speech2text()
-        obj, source, target, return_pos = self.extract_keyword(output_message)
+        with self._lock:
+            keyword_str = self._latest_command
+            self._latest_command = None
+        self._command_ready.clear()
 
-        # extract_keyword가 파싱에 실패해 None을 반환한 경우 방어 처리
-        # (원래 코드는 이 경우에도 " ".join(keyword)를 호출해 TypeError가 발생했음)
-        if obj is None:
-            self.get_logger().error("Failed to extract keyword from LLM response")
-            response.success = False
-            response.message = "Failed to extract keyword"
-            return response
-
-        # obj, source, target, return_pos는 각각 리스트이므로
-        # " ".join(keyword)처럼 튜플을 바로 join하면
-        # 각 원소가 str이 아닌 list라 TypeError가 발생한다.
-        # 따라서 모든 리스트를 하나의 문자열 리스트로 평탄화(flatten)한 뒤 join한다.
-        keyword_str = (
-            f"{' '.join(obj)} / "
-            f"{' '.join(source)} / "
-            f"{' '.join(target)} / "
-            f"{' '.join(return_pos)}"
-    )
-
-        self.get_logger().warn(f"Detected tools: {keyword_str}")
-
-        # 응답 객체 설정
         response.success = True
-        response.message = keyword_str  # 감지된 키워드를 응답 메시지로 반환
+        response.message = keyword_str
         return response
 
 

@@ -28,8 +28,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        
             'robot_action_node = my_robot_pkg.robot_action_node:main',
+            'gripper_width_probe = my_robot_pkg.gripper_width_probe:main',
         ],
     },
 )
