@@ -127,7 +127,11 @@ ROI_Z_MAX_M = 0.60
 CLUSTER_EPS_M = 0.03
 CLUSTER_MIN_POINTS = 15
 
-RECORD_DIR = os.path.expanduser("~/cobot_scan")
+# 나중에 DB/UI 연동을 생각해서 cobot_scan(다른 프로젝트의 범용 스캔 폴더)이
+# 아니라 이 워크스페이스 루트 하위 data/world_maps로 저장한다. src/ 밑이 아니라
+# 워크스페이스 루트 형제 디렉토리인 이유는, point cloud/npy 산출물이 git으로
+# 추적되지 않게 하기 위함 (.gitignore의 data/ 참고).
+RECORD_DIR = os.path.expanduser("~/RL-Avoid-Obstacle/data/world_maps")
 
 
 # =========================
