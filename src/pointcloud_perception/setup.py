@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'pointcloud_node = pointcloud_perception.pointcloud_node:main',
             'world_map_node = pointcloud_perception.world_map_node:main',
+            'offline_icp_experiment = pointcloud_perception.offline_icp_experiment:main',
         ],
     },
 )

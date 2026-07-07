@@ -18,11 +18,11 @@
 # 있다. detection.py(ObjectDetectionNode가 서비스 콜백 안에서 자기 자신이 아닌
 # 별도 ImgNode를 spin하는 패턴)를 그대로 따라서, MoveLine/point cloud/TF는
 # 별도의 ScanWorker 노드에서 처리한다.
-import json
-import math
-import os
+#
+# 스캔 경로 생성, TF/ROI 적용, ground z 보정, ICP 잔차보정, 클러스터링/저장 같은
+# 순수 알고리즘은 world_map_algo.py로 분리되어 있다 - rclpy 등 ROS 의존성이 없어야
+# offline_icp_experiment.py가 ROS 워크스페이스 없이 저장된 스캔으로 튜닝할 수 있다.
 import time
-from datetime import datetime
 
 import numpy as np
 import rclpy
@@ -40,8 +40,24 @@ from dsr_msgs2.srv import MoveLine
 
 from obstacle_avoidance_msgs.msg import WorldMapObstacle, WorldMapUpdate
 
+from pointcloud_perception.world_map_algo import (
+    ENABLE_ICP_MAPPING,
+    VOXEL_SIZE_M,
+    align_ground_z_per_pose,
+    apply_transform,
+    build_map_with_icp,
+    cluster_points,
+    compute_ground_quality,
+    crop_roi,
+    generate_scan_poses,
+    is_flat_pose,
+    save_record,
+    transform_stamped_to_matrix,
+    voxel_downsample,
+)
+
 try:
-    import open3d as o3d
+    import open3d as o3d  # noqa: F401  (world_map_algo가 이미 가용성 체크를 하지만, 여긴 직접 안 씀)
     OPEN3D_AVAILABLE = True
 except Exception:
     OPEN3D_AVAILABLE = False
@@ -54,24 +70,6 @@ except Exception:
 POINTCLOUD_TOPIC = "/camera/camera/depth/color/points"
 MOVE_LINE_SERVICE = "/dsr01/motion/move_line"
 TARGET_FRAME = "base_link"
-
-START_POINT = {"x": 283.81, "y": 370.71}
-END_POINT = {"x": 563.54, "y": -271.25}
-
-X_GAP_MM = 140.0
-Y_GAP_MM = 140.0
-
-FIXED_Z_MM = 466.13
-FIXED_A_DEG = 1.488
-FIXED_B_DEG = -180.0
-FIXED_C_DEG = -178.73
-
-# 스캔 시작/끝 지점에서 옆면을 찍기 위한 "사이드뷰" 여분 포즈.
-# 실제 로봇을 손으로 움직여 찾은 값이라 정밀하지 않음 (2026-07-06) - 실측 후 조정 필요.
-SIDE_VIEW_Y_OFFSET_MM = 50.0  # 중심 반대쪽으로 이만큼 더 물러난다
-SIDE_VIEW_Z_DROP_MM = 30.0    # FIXED_Z_MM에서 이만큼 낮춘다 (정확한 값 아님, placeholder)
-SIDE_VIEW_START_ABC_DEG = (98.7, -154.71, -82.0)
-SIDE_VIEW_END_ABC_DEG = (92.3, 142.3, -90.13)
 
 VEL = [60.0, 30.0]
 ACC = [60.0, 30.0]
@@ -104,192 +102,10 @@ FRAMES_PER_POSE = 1
 CLOUD_WAIT_TIMEOUT_SEC = 10.0
 TF_WAIT_TIMEOUT_SEC = 5.0
 
-VOXEL_SIZE_M = 0.005
 
 # =========================
-# 포즈별 ground z 정렬 옵션
+# TF / point cloud 유틸리티 (ROS 메시지 의존)
 # =========================
-# tilt 시 +Y/-Y 진행 방향에 따라 바닥/테이블 plane이 위아래로 살짝 갈라지는 현상을
-# 완화하기 위한 후처리다. 진짜 hand-eye calibration을 대체하지는 못하지만,
-# map layer를 줄이는 데 가장 직접적으로 효과가 있다.
-ENABLE_GROUND_Z_ALIGNMENT = True
-GROUND_Z_HIST_MIN_M = -0.03
-GROUND_Z_HIST_MAX_M = 0.08
-GROUND_Z_HIST_BIN_M = 0.002
-GROUND_Z_MIN_POINTS_IN_BIN = 1000
-MAX_GROUND_Z_CORRECTION_M = 0.04
-
-ROI_MARGIN_MM = 80.0
-ROI_Z_MIN_M = -0.05
-ROI_Z_MAX_M = 0.60
-
-# DBSCAN 클러스터링 파라미터. 실제 스캔 밀도 보고 튜닝 필요.
-CLUSTER_EPS_M = 0.03
-CLUSTER_MIN_POINTS = 15
-
-# 나중에 DB/UI 연동을 생각해서 cobot_scan(다른 프로젝트의 범용 스캔 폴더)이
-# 아니라 이 워크스페이스 루트 하위 data/world_maps로 저장한다. src/ 밑이 아니라
-# 워크스페이스 루트 형제 디렉토리인 이유는, point cloud/npy 산출물이 git으로
-# 추적되지 않게 하기 위함 (.gitignore의 data/ 참고).
-RECORD_DIR = os.path.expanduser("~/RL-Avoid-Obstacle/data/world_maps")
-
-
-# =========================
-# 스캔 경로 생성 (지그재그 그리드 + 시작/끝 사이드뷰)
-# =========================
-
-def make_inclusive_range(start: float, end: float, step_abs: float):
-    if step_abs <= 0:
-        raise ValueError("step_abs must be positive")
-
-    dist = abs(end - start)
-    n = int(math.ceil(dist / step_abs)) + 1
-
-    if n <= 1:
-        return np.array([start], dtype=float)
-
-    return np.linspace(start, end, n)
-
-
-def generate_scan_columns():
-    """[(x, [y0, y1, ...]), ...] 형태로 column별 지그재그 순서의 y 리스트를 생성."""
-    x_values = make_inclusive_range(START_POINT["x"], END_POINT["x"], X_GAP_MM)
-    y_values = make_inclusive_range(START_POINT["y"], END_POINT["y"], Y_GAP_MM)
-
-    columns = []
-    for ix, x in enumerate(x_values):
-        ys = y_values if ix % 2 == 0 else y_values[::-1]
-        columns.append((float(x), [float(y) for y in ys]))
-
-    return columns
-
-
-def side_view_pose(x, at_top):
-    """x 위치에서, 스캔 영역의 위쪽(at_top=True) 또는 아래쪽 끝의 사이드뷰 포즈.
-
-    지그재그 특성상 각 column은 항상 START_POINT.y(위) 또는 END_POINT.y(아래)
-    한쪽에서 시작해 반대쪽에서 끝난다. START/END에서 실측한 (오프셋, A,B,C)를
-    그 column의 x 좌표에 그대로 적용한다 (2026-07-06: 공식으로 재계산하는 대신
-    실측값을 재사용하기로 함 - END쪽에서 각도 공식이 실측과 160도 이상 어긋나는
-    걸 확인해서, 중간 지점도 공식보다는 검증된 실측값을 그대로 쓰는 게 안전하다고 판단).
-    """
-    if at_top:
-        y = START_POINT["y"] + SIDE_VIEW_Y_OFFSET_MM
-        abc = SIDE_VIEW_START_ABC_DEG
-    else:
-        y = END_POINT["y"] - SIDE_VIEW_Y_OFFSET_MM
-        abc = SIDE_VIEW_END_ABC_DEG
-    return [x, y, FIXED_Z_MM - SIDE_VIEW_Z_DROP_MM] + list(abc)
-
-
-def generate_scan_poses():
-    """지그재그 flat scan + 시작/중간 column 경계 side view.
-
-    마지막 END_POINT side view는 로봇 물리 한계로 제외한다.
-    따라서 마지막 pose는 flat pose로 끝난다.
-    """
-    columns = generate_scan_columns()
-    poses = []
-
-    # scan 시작 전 START 쪽 side view
-    poses.append(side_view_pose(columns[0][0], at_top=True))
-
-    for i, (x, ys) in enumerate(columns):
-        for y in ys:
-            poses.append([x, y, FIXED_Z_MM, FIXED_A_DEG, FIXED_B_DEG, FIXED_C_DEG])
-
-        # 마지막 column의 side view는 로봇 물리 한계 때문에 추가하지 않는다.
-        if i < len(columns) - 1:
-            ends_at_top = (i % 2 == 1)
-            poses.append(side_view_pose(x, at_top=ends_at_top))
-
-    return [[float(v) for v in pose] for pose in poses]
-
-
-def is_flat_pose(pose):
-    """평범한 탑다운 그리드 포즈인지(True) 사이드뷰 포즈인지(False) 판별."""
-    _, _, _, a, b, c = pose
-    return (
-        abs(a - FIXED_A_DEG) < 1e-6
-        and abs(b - FIXED_B_DEG) < 1e-6
-        and abs(c - FIXED_C_DEG) < 1e-6
-    )
-
-
-# =========================
-# TF / point cloud 유틸리티
-# =========================
-
-def quaternion_to_matrix(qx, qy, qz, qw):
-    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
-    if norm < 1e-12:
-        return np.eye(3)
-
-    qx /= norm
-    qy /= norm
-    qz /= norm
-    qw /= norm
-
-    xx, yy, zz = qx * qx, qy * qy, qz * qz
-    xy, xz, yz = qx * qy, qx * qz, qy * qz
-    wx, wy, wz = qw * qx, qw * qy, qw * qz
-
-    return np.array([
-        [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz),       2.0 * (xz + wy)],
-        [2.0 * (xy + wz),       1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-        [2.0 * (xz - wy),       2.0 * (yz + wx),       1.0 - 2.0 * (xx + yy)],
-    ], dtype=np.float64)
-
-
-def transform_to_matrix(transform_stamped):
-    t = transform_stamped.transform.translation
-    q = transform_stamped.transform.rotation
-
-    R = quaternion_to_matrix(q.x, q.y, q.z, q.w)
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = R
-    T[:3, 3] = [t.x, t.y, t.z]
-    return T
-
-
-def apply_transform(points_xyz, T):
-    if points_xyz.size == 0:
-        return points_xyz
-
-    ones = np.ones((points_xyz.shape[0], 1), dtype=np.float64)
-    homo = np.hstack([points_xyz.astype(np.float64), ones])
-    transformed = (T @ homo.T).T
-    return transformed[:, :3]
-
-
-def get_roi_bounds_m():
-    xs = [START_POINT["x"], END_POINT["x"]]
-    ys = [START_POINT["y"], END_POINT["y"]]
-
-    x_min_mm = min(xs) - ROI_MARGIN_MM
-    x_max_mm = max(xs) + ROI_MARGIN_MM
-    y_min_mm = min(ys) - ROI_MARGIN_MM
-    y_max_mm = max(ys) + ROI_MARGIN_MM
-
-    return {
-        "x_min_m": x_min_mm / 1000.0,
-        "x_max_m": x_max_mm / 1000.0,
-        "y_min_m": y_min_mm / 1000.0,
-        "y_max_m": y_max_mm / 1000.0,
-        "z_min_m": ROI_Z_MIN_M,
-        "z_max_m": ROI_Z_MAX_M,
-    }
-
-
-def crop_roi(points_base):
-    roi = get_roi_bounds_m()
-    mask = (
-        (points_base[:, 0] >= roi["x_min_m"]) & (points_base[:, 0] <= roi["x_max_m"]) &
-        (points_base[:, 1] >= roi["y_min_m"]) & (points_base[:, 1] <= roi["y_max_m"]) &
-        (points_base[:, 2] >= roi["z_min_m"]) & (points_base[:, 2] <= roi["z_max_m"])
-    )
-    return points_base[mask]
-
 
 def msg_stamp_to_sec(stamp_msg):
     return stamp_msg.sec + stamp_msg.nanosec * 1e-9
@@ -303,238 +119,6 @@ def pointcloud_msg_to_xyz(msg):
     if not points:
         return np.empty((0, 3), dtype=np.float64)
     return np.asarray(points, dtype=np.float64)
-
-
-def voxel_downsample(points_xyz, voxel_size_m):
-    if not OPEN3D_AVAILABLE or points_xyz.shape[0] == 0 or voxel_size_m <= 0:
-        return points_xyz
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points_xyz)
-    pcd = pcd.voxel_down_sample(voxel_size_m)
-    return np.asarray(pcd.points)
-
-
-def estimate_ground_z_mode(points_xyz):
-    """포즈별 point cloud에서 바닥/테이블로 보이는 z band의 mode를 추정한다.
-
-    RealSense tilt에서 생기는 layer는 대부분 z 방향 bias로 먼저 드러난다.
-    전체 median은 장애물/옆면 point에 끌릴 수 있으므로, 낮은 z 범위에서 histogram
-    peak를 ground 후보로 사용한다.
-    """
-    if points_xyz is None or points_xyz.shape[0] == 0:
-        return None
-
-    z = points_xyz[:, 2]
-    z = z[(z >= GROUND_Z_HIST_MIN_M) & (z <= GROUND_Z_HIST_MAX_M)]
-    if z.size < GROUND_Z_MIN_POINTS_IN_BIN:
-        return None
-
-    bins = np.arange(
-        GROUND_Z_HIST_MIN_M,
-        GROUND_Z_HIST_MAX_M + GROUND_Z_HIST_BIN_M,
-        GROUND_Z_HIST_BIN_M
-    )
-    counts, edges = np.histogram(z, bins=bins)
-    if counts.size == 0:
-        return None
-
-    idx = int(np.argmax(counts))
-    if int(counts[idx]) < GROUND_Z_MIN_POINTS_IN_BIN:
-        return None
-
-    return {
-        "z_mode": float((edges[idx] + edges[idx + 1]) * 0.5),
-        "bin_count": int(counts[idx]),
-        "bin_min": float(edges[idx]),
-        "bin_max": float(edges[idx + 1]),
-    }
-
-
-def align_ground_z_per_pose(per_pose_points, poses):
-    """side-view pose에 대해서만 ground z mode를 기준으로 z translation 보정한다.
-
-    주의:
-    - flat/top-down pose는 원래 가장 신뢰도가 높은 기준 map이므로 보정하지 않는다.
-    - 이전 버전은 flat pose까지 z 보정을 적용해서, histogram이 바닥이 아닌 band를
-      ground로 잡는 순간 flat map 자체가 위아래로 틀어질 수 있었다.
-    - 여기서는 flat pose는 기준(reference) 산출에만 쓰고, 실제 z 보정은 side pose에만 적용한다.
-    """
-    if not ENABLE_GROUND_Z_ALIGNMENT:
-        return per_pose_points, {
-            "enabled": False,
-            "reason": "ENABLE_GROUND_Z_ALIGNMENT=False",
-            "reference_ground_z": None,
-            "per_pose": [],
-        }
-
-    estimates = [estimate_ground_z_mode(points) for points in per_pose_points]
-
-    flat_ground = [
-        est["z_mode"]
-        for est, pose in zip(estimates, poses)
-        if est is not None and is_flat_pose(pose)
-    ]
-    all_ground = [est["z_mode"] for est in estimates if est is not None]
-
-    if flat_ground:
-        reference_ground_z = float(np.median(flat_ground))
-        reference_source = "flat_pose_median"
-    elif all_ground:
-        reference_ground_z = float(np.median(all_ground))
-        reference_source = "all_pose_median"
-    else:
-        return per_pose_points, {
-            "enabled": False,
-            "reason": "no valid ground z mode",
-            "reference_ground_z": None,
-            "per_pose": [],
-        }
-
-    corrected_points = []
-    per_pose_info = []
-
-    for i, (pose, points, est) in enumerate(zip(poses, per_pose_points, estimates)):
-        pose_is_flat = is_flat_pose(pose)
-        info = {
-            "pose_index": int(i),
-            "is_flat_pose": bool(pose_is_flat),
-            "ground_z_mode": None,
-            "ground_bin_count": 0,
-            "z_correction_m": 0.0,
-            "applied": False,
-            "reason": None,
-        }
-
-        if est is None or points is None or points.shape[0] == 0:
-            corrected_points.append(points)
-            info["reason"] = "no valid ground estimate or empty cloud"
-            per_pose_info.append(info)
-            continue
-
-        z_mode = float(est["z_mode"])
-        dz = float(reference_ground_z - z_mode)
-
-        info["ground_z_mode"] = z_mode
-        info["ground_bin_count"] = int(est["bin_count"])
-        info["z_correction_m"] = dz
-
-        if pose_is_flat:
-            corrected_points.append(points)
-            info["reason"] = "flat pose used as reference only; not corrected"
-        elif abs(dz) <= MAX_GROUND_Z_CORRECTION_M:
-            p2 = points.copy()
-            p2[:, 2] += dz
-            corrected_points.append(p2)
-            info["applied"] = True
-            info["reason"] = "side pose corrected"
-        else:
-            corrected_points.append(points)
-            info["reason"] = "correction too large; skipped"
-
-        per_pose_info.append(info)
-
-    return corrected_points, {
-        "enabled": True,
-        "mode": "side_pose_only",
-        "reference_source": reference_source,
-        "reference_ground_z": reference_ground_z,
-        "max_ground_z_correction_m": MAX_GROUND_Z_CORRECTION_M,
-        "per_pose": per_pose_info,
-    }
-
-def cluster_points(points_xyz, eps=CLUSTER_EPS_M, min_points=CLUSTER_MIN_POINTS):
-    """DBSCAN으로 point cloud를 군집화해서 장애물 목록을 만든다.
-
-    반환: [{"id", "centroid": [x,y,z], "radius", "num_points"}, ...]
-    """
-    if points_xyz.shape[0] == 0:
-        return []
-
-    if not OPEN3D_AVAILABLE:
-        raise RuntimeError("open3d가 없어서 클러스터링을 할 수 없습니다.")
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points_xyz)
-    labels = np.array(pcd.cluster_dbscan(eps=eps, min_points=min_points))
-
-    clusters = []
-    for label in sorted(set(labels.tolist())):
-        if label < 0:
-            continue  # noise
-        member_points = points_xyz[labels == label]
-        centroid = member_points.mean(axis=0)
-        radius = float(np.linalg.norm(member_points - centroid, axis=1).max())
-        clusters.append({
-            "id": int(label),
-            "centroid": centroid.tolist(),
-            "radius": radius,
-            "num_points": int(member_points.shape[0]),
-        })
-
-    return clusters
-
-
-def save_pose_cloud(out_dir, pose_index, points):
-    if not OPEN3D_AVAILABLE or points.shape[0] == 0:
-        return
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
-    o3d.io.write_point_cloud(
-        os.path.join(out_dir, f"scan_pose_{pose_index:03d}_base_roi.ply"), pcd
-    )
-
-
-def save_record(merged_points, clusters, poses, per_pose_points=None, ground_z_alignment=None):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(RECORD_DIR, f"world_map_update_{timestamp}")
-    os.makedirs(out_dir, exist_ok=True)
-
-    np.save(os.path.join(out_dir, "merged_base_roi.npy"), merged_points)
-
-    # cobot_scan/world_map_scan_capture_ranged.py도 .ply를 같이 저장했었다.
-    # publish_saved_world_cloud.py는 .npy만 있으면 되지만, open3d로 .ply를
-    # 직접 읽어서 draw_geometries로 보는 워크플로우도 계속 쓰려면 .ply가 필요하다.
-    if OPEN3D_AVAILABLE and merged_points.shape[0] > 0:
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(merged_points.astype(np.float64))
-        o3d.io.write_point_cloud(os.path.join(out_dir, "merged_base_roi.ply"), pcd)
-
-    # 포즈별로 따로 저장 - 어느 포즈가 어긋난 원인인지 하나씩 눈으로 확인할 수 있게
-    # (2026-07-06: 바닥이 여러 겹으로 보이는 문제의 원인 포즈를 찾기 위해 추가).
-    if per_pose_points is not None:
-        for i, (pose, points) in enumerate(zip(poses, per_pose_points)):
-            save_pose_cloud(out_dir, i, points)
-            meta = {
-                "pose_index": i,
-                "pose_xyz_abc": pose,
-                "is_flat_pose": is_flat_pose(pose),
-                "num_points": int(points.shape[0]),
-            }
-            if ground_z_alignment and ground_z_alignment.get("per_pose"):
-                meta["ground_z_alignment"] = ground_z_alignment["per_pose"][i]
-            meta_path = os.path.join(out_dir, f"scan_pose_{i:03d}_meta.json")
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
-
-    summary = {
-        "start_point_xy_mm": START_POINT,
-        "end_point_xy_mm": END_POINT,
-        "x_gap_mm": X_GAP_MM,
-        "y_gap_mm": Y_GAP_MM,
-        "side_view_y_offset_mm": SIDE_VIEW_Y_OFFSET_MM,
-        "side_view_z_drop_mm": SIDE_VIEW_Z_DROP_MM,
-        "side_view_start_abc_deg": SIDE_VIEW_START_ABC_DEG,
-        "side_view_end_abc_deg": SIDE_VIEW_END_ABC_DEG,
-        "cluster_eps_m": CLUSTER_EPS_M,
-        "cluster_min_points": CLUSTER_MIN_POINTS,
-        "ground_z_alignment": ground_z_alignment,
-        "scan_poses": poses,
-        "clusters": clusters,
-    }
-    with open(os.path.join(out_dir, "world_map_summary.json"), "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-
-    return out_dir
 
 
 def build_world_map_update_msg(clusters, scan_dir, stamp):
@@ -727,7 +311,7 @@ class ScanWorker(Node):
             timeout_sec=TF_WAIT_TIMEOUT_SEC
         )
 
-        T = transform_to_matrix(tf)
+        T = transform_stamped_to_matrix(tf)
         xyz_camera = pointcloud_msg_to_xyz(msg)
         return apply_transform(xyz_camera, T)
 
@@ -792,7 +376,6 @@ class ScanWorker(Node):
             if prev_pose is not None and (not is_flat_pose(prev_pose)) and is_flat_pose(pose):
                 settle_sec = max(settle_sec, AFTER_SIDE_RETURN_SETTLE_SEC)
 
-
             self.get_logger().info(
                 f"pose {i:03d}/{len(poses)-1:03d} reached candidate: "
                 f"type={pose_type}, settle={settle_sec:.2f}s"
@@ -820,8 +403,9 @@ class ScanWorker(Node):
             per_pose_points.append(pose_points)
             prev_pose = pose
 
+        ground_quality = compute_ground_quality(per_pose_points, poses)
         corrected_per_pose_points, ground_z_alignment = align_ground_z_per_pose(
-            per_pose_points, poses
+            per_pose_points, poses, ground_quality
         )
 
         if ground_z_alignment.get("enabled"):
@@ -841,18 +425,25 @@ class ScanWorker(Node):
                 f"ground z alignment disabled: {ground_z_alignment.get('reason')}"
             )
 
-        merged_list = [p for p in corrected_per_pose_points if len(p) > 0]
-        if not merged_list:
-            return (
-                np.empty((0, 3), dtype=np.float64),
-                poses,
-                corrected_per_pose_points,
-                ground_z_alignment,
+        if ENABLE_ICP_MAPPING:
+            merged_points, icp_mapping_report = build_map_with_icp(
+                corrected_per_pose_points, poses, ground_quality
             )
+        else:
+            merged_list = [p for p in corrected_per_pose_points if len(p) > 0]
+            merged_points = (
+                voxel_downsample(np.vstack(merged_list), VOXEL_SIZE_M)
+                if merged_list else np.empty((0, 3), dtype=np.float64)
+            )
+            icp_mapping_report = None
 
-        merged_points = np.vstack(merged_list)
-        merged_points = voxel_downsample(merged_points, VOXEL_SIZE_M)
-        return merged_points, poses, corrected_per_pose_points, ground_z_alignment
+        return (
+            merged_points,
+            poses,
+            corrected_per_pose_points,
+            ground_z_alignment,
+            icp_mapping_report,
+        )
 
 
 # =========================
@@ -873,7 +464,9 @@ class WorldMapNode(Node):
         self.get_logger().info("World map update requested.")
 
         try:
-            merged_points, poses, per_pose_points, ground_z_alignment = self.worker.run_scan()
+            merged_points, poses, per_pose_points, ground_z_alignment, icp_mapping_report = (
+                self.worker.run_scan()
+            )
         except Exception as e:
             self.get_logger().error(f"scan failed: {e}")
             response.success = False
@@ -894,7 +487,9 @@ class WorldMapNode(Node):
             response.message = f"clustering failed: {e}"
             return response
 
-        scan_dir = save_record(merged_points, clusters, poses, per_pose_points, ground_z_alignment)
+        scan_dir = save_record(
+            merged_points, clusters, poses, per_pose_points, ground_z_alignment, icp_mapping_report
+        )
 
         msg = build_world_map_update_msg(clusters, scan_dir, self.get_clock().now().to_msg())
         self.obstacle_pub.publish(msg)
