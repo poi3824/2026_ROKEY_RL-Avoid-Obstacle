@@ -45,6 +45,17 @@ GET_TARGET_TIMEOUT = 5.0
 GET_SURFACE_Z_SAMPLES = 5  # 팔이 settle 중이거나 depth가 순간적으로 튀는 프레임을 걸러내기 위한 샘플 수
 GET_SURFACE_Z_SAMPLE_INTERVAL = 0.1  # 샘플 사이 간격(초)
 
+# 세그멘테이션 기반 grasp yaw 계산용 캘리브레이션 상수.
+# 카메라와 그리퍼가 손목(wrist)에 함께 고정되어 회전하고(B~180도로 항상 수직 하방을
+# 봄), C(wrist yaw)만 돌리면 카메라도 같이 돌아간다. 따라서 그리퍼 손가락이 닫히는
+# 축은 이미지 평면 기준으로 항상 같은 각도(GRASP_AXIS_IMG_ANGLE_DEG)에 보인다 —
+# 이 값은 실제 그리퍼를 카메라 화면에 비춰서 측정해야 하는 하드웨어 캘리브레이션값.
+# GRASP_ANGLE_SIGN은 이미지 각도가 +로 늘 때 C를 +로 돌려야 하는지 -로 돌려야
+# 하는지(카메라 장착 방향에 따라 다름) — 실제 로봇에서 한 번 테스트해서 결정한다.
+# TODO(hardware calibration): 아래 두 값을 실제 장비에서 측정해 채운다.
+GRASP_AXIS_IMG_ANGLE_DEG = 0.0
+GRASP_ANGLE_SIGN = 1.0
+
 POSITION_COORDS = {
     "home": [417.61, -0.76, 477.45, 174.25, 179.99, -7.65],
     "scan": [603.65, 117.06, 466.15, 96.74, -179.75, -85.08],
@@ -52,6 +63,19 @@ POSITION_COORDS = {
     "target2": [199.91, 0.066, 466.172, 177.529, 179.942, -2.8],
     "target3": [199.93, 100.092, 466.217, 174.166, 179.947, -6.174],
 }
+
+
+def compute_grasp_c(current_c, angle_deg):
+    """마스크 짧은 변의 이미지 각도(angle_deg)로부터 새 wrist yaw(C)를 계산한다.
+
+    GRASP_AXIS_IMG_ANGLE_DEG 주석 참고: 물체가 이미지에서 기준각 대비 angle_deg만큼
+    돌아가 있으면, C를 그만큼 돌려서 그리퍼 손가락 축과 물체의 짧은 변을 맞춘다.
+    그리퍼가 대칭(핑거 2개)이라 delta가 90도를 넘어가면 반대쪽(긴 변)을 잡게 되므로
+    [-90, 90) 범위로 정규화해 항상 최소 회전만 적용한다.
+    """
+    delta = GRASP_ANGLE_SIGN * (angle_deg - GRASP_AXIS_IMG_ANGLE_DEG)
+    delta = ((delta + 90.0) % 180.0) - 90.0
+    return current_c + delta
 
 
 DR_init.__dsr__id = ROBOT_ID
@@ -358,7 +382,9 @@ class RobotActionNode(Node):
             base_coords[2] += DEPTH_OFFSET
             base_coords[2] = max(base_coords[2], MIN_DEPTH)
 
-        return list(base_coords[:3]) + robot_posx[3:]
+        grasp_c = compute_grasp_c(robot_posx[5], result.angle_deg)
+        orientation = list(robot_posx[3:5]) + [grasp_c]
+        return list(base_coords[:3]) + orientation
 
     def get_surface_z(self):
         """카메라 중앙 픽셀의 depth를 여러 번 읽어 base 좌표계 z값의 median을 반환한다 (YOLO 미사용).

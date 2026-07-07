@@ -18,7 +18,14 @@ DEPTH_ROI_HALF = 3  # (2*n+1)x(2*n+1) 정사각형 영역에서 median 계산
 # 2026-07-07: robot_action_node의 응급/일시정지 로직이 참고하는 hand 안전 감지.
 # get_3d_position 서비스(픽 본연의 ~1초짜리 멀티프레임 감지)와 자원을 공유하면
 # pick이 느려지므로, 완전히 별도인 타이머 + 단일 프레임 감지 + 토픽 발행으로 분리한다.
-HAND_CHECK_INTERVAL_SEC = 0.2  # 5Hz
+#
+# 2026-07-07: seg 모델(best_seg.pt)은 이 장비(CPU 추론)에서 1프레임 추론에만
+# ~1초 걸린다. 0.2초(5Hz) 간격으로는 추론이 간격보다 느려서 콜백이 끝없이
+# 밀리고, object_detection_node가 싱글스레드 executor라 그 밀린 콜백들이
+# /get_3d_position 서비스 요청 처리까지 막아버린다(관측: 서비스 호출이 계속
+# 타임아웃남). 그래서 간격을 실제 추론 시간보다 여유 있게 늘렸다 — 손 감지
+# 반응은 느려지지만 서비스 자체가 안 막히는 게 우선이다.
+HAND_CHECK_INTERVAL_SEC = 1.5
 HAND_LABEL = "hand"
 
 
@@ -61,34 +68,42 @@ class ObjectDetectionNode(Node):
         raise ValueError(f"Unsupported model: {name}")
 
     def handle_get_depth(self, request, response):
-        """클라이언트 요청을 처리해 3D 좌표를 반환합니다."""
+        """클라이언트 요청을 처리해 3D 좌표와 grasp 각도를 반환합니다."""
         self.get_logger().info(f"Received request: {request}")
-        coords = self._compute_position(request.target)
-        response.depth_position = [float(x) for x in coords]
+        x, y, z, angle_deg = self._compute_position(request.target)
+        response.depth_position = [float(x), float(y), float(z)]
+        response.angle_deg = float(angle_deg)
         return response
 
     def _compute_position(self, target):
-        """이미지를 처리해 객체의 카메라 좌표를 계산합니다."""
+        """이미지를 처리해 객체의 카메라 좌표와 grasp용 짧은 변 각도(image-plane, deg)를 계산합니다.
+
+        angle_deg는 seg 모델이 아니거나 마스크를 못 찾은 경우 0.0(회전 없음)이 된다.
+        """
         rclpy.spin_once(self.img_node)
 
+        angle_deg = 0.0
         if target == "":
             color = self._wait_for_valid_data(self.img_node.get_color_frame, "color frame")
             h, w = color.shape[:2]
             cx, cy = w//2, h//2
         else:
-            box, score = self.model.get_best_detection(self.img_node, target)
+            box, score, angle_deg = self.model.get_best_detection(self.img_node, target)
             if box is None or score is None:
                 self.get_logger().warn(f"No detection for '{target}'")
-                return 0.0, 0.0, 0.0
-            self.get_logger().info(f"Detected: box={box}, score={score:.2f}")
+                return 0.0, 0.0, 0.0, 0.0
+            self.get_logger().info(f"Detected: box={box}, score={score:.2f}, angle={angle_deg}")
             cx, cy = map(int, [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
-        
+            if angle_deg is None:
+                angle_deg = 0.0
+
         cz = self._get_depth(cx, cy)
         if cz is None:
             self.get_logger().warn("Depth out of range.")
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
 
-        return self._pixel_to_camera_coords(cx, cy, cz)
+        x, y, z = self._pixel_to_camera_coords(cx, cy, cz)
+        return x, y, z, angle_deg
 
     def _get_depth(self, x, y):
         """(x,y) 주변 ROI에서 유효한(0이 아닌) depth 값들 중 가장 가까운(min) 값을 반환합니다.
