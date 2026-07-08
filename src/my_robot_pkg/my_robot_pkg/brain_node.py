@@ -31,14 +31,16 @@ from robot_interfaces.msg import SafetyState
 # (오늘 겪은 "다음 동작으로 안 넘어감" 증상의 원인).
 #
 # motion_node.py 기준 최악 케이스 역산(Pick 기준):
-#   get_3d_position 왕복 GET_TARGET_TIMEOUT=12s
-#   get_surface_z()는 GET_SURFACE_Z_SAMPLES=5회 샘플 × 12s = 최대 60s
-#   PICK_MAX_ATTEMPTS=3회 시도, 매 시도 hover 이동 + get_surface_z(최대 60s)
-#     + 하강 + gripper(GRIPPER_TIMEOUT_SEC=3s) + 실패 시 redetect(최대 12s)
-#   => 3 * (60 + 3) + 2 * 12 ≈ 213s. 여유를 더해 240s로 잡는다.
+# 2026-07-08: "seg 추론 프레임당 ~1초" 가정이 실측(~0.1초)과 안 맞았던 걸 바로잡아
+# GET_TARGET_TIMEOUT을 12s->6s로 줄인 김에 이 값도 같이 재계산한다.
+#   get_3d_position 왕복 GET_TARGET_TIMEOUT=6s
+#   get_surface_z()는 GET_SURFACE_Z_SAMPLES=5회 샘플 × 6s = 최대 30s
+#   PICK_MAX_ATTEMPTS=3회 시도, 매 시도 hover 이동 + get_surface_z(최대 30s)
+#     + 하강 + gripper(GRIPPER_TIMEOUT_SEC=3s) + 실패 시 redetect(최대 6s)
+#   => 3 * (30 + 3) + 2 * 6 ≈ 111s. 여유를 더해 130s로 잡는다.
 # MoveTo/Place는 이보다 훨씬 짧게 끝나지만(get_surface_z 호출이 0~1회) 같은 상수를
-# 공용으로 써도 실패 감지가 최대 240s 늦어질 뿐 안전엔 문제없어 하나로 통일한다.
-ACTION_RESULT_TIMEOUT_SEC = 240.0
+# 공용으로 써도 실패 감지가 최대 130s 늦어질 뿐 안전엔 문제없어 하나로 통일한다.
+ACTION_RESULT_TIMEOUT_SEC = 130.0
 
 POSITION_COORDS = {
     "home": [417.61, -0.76, 477.45, 174.25, 179.99, -7.65],

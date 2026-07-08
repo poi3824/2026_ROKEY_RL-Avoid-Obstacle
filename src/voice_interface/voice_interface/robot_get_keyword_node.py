@@ -329,6 +329,7 @@ RESUME / RESUME / RESUME / RESUME
             while rclpy.ok() and (time.time() - session_start) < MAX_SESSION_SEC:
                 # STT --> Keyword Extract --> Embedding
                 output_message = self.stt.speech2text()
+                self._flush_mic_stream()
                 self.get_logger().info(f"STT 인식 결과: '{output_message}'")
 
                 # Whisper는 무음/잡음 구간에서 빈 문자열이나 아주 짧은 환청을 자주
@@ -375,6 +376,24 @@ RESUME / RESUME / RESUME / RESUME
                 with self._lock:
                     self._latest_command = keyword_str
                 self._command_ready.set()
+
+    def _flush_mic_stream(self):
+        """STT(sounddevice) 녹음 동안 밀린 PyAudio 웨이크워드 스트림 버퍼를 비운다.
+
+        2026-07-08: sd.rec()가 5초+ 동안 마이크를 붙잡는 사이 self.mic_controller.stream
+        (PyAudio, 웨이크워드용)은 아무도 read()하지 않아 내부 버퍼가 밀리거나
+        overflow(exception_on_overflow=False라 조용히 드롭)된다. 그 상태로 바로
+        is_wakeup() 루프를 재개하면 밀리거나 끊긴 오디오가 모델에 들어가 웨이크워드를
+        말하지 않았는데도 감지되는 오탐이 생겼다(재현: 명령 처리 30ms 후 오탐).
+        그래서 STT가 끝날 때마다 그 사이 쌓인 걸 다 읽어서 버리고 새로 시작한다.
+        """
+        try:
+            stream = self.mic_controller.stream
+            available = stream.get_read_available()
+            if available > 0:
+                stream.read(available, exception_on_overflow=False)
+        except Exception as e:
+            self.get_logger().warn(f"마이크 버퍼 플러시 실패(무시): {e}")
 
     def _call_emergency_stop(self):
         """2026-07-07: /voice/estop 토픽에 True를 발행한다 (fire-and-forget).
