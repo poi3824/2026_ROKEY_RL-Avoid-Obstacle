@@ -51,6 +51,7 @@ from pointcloud_perception.world_map_algo import (
     crop_roi,
     generate_scan_poses,
     is_flat_pose,
+    save_debug_visualizations,
     save_record,
     transform_stamped_to_matrix,
     voxel_downsample,
@@ -508,6 +509,16 @@ class WorldMapNode(Node):
         scan_dir = save_record(
             merged_points, clusters, poses, per_pose_points, ground_z_alignment, icp_mapping_report
         )
+
+        # top-view 디버그 PNG + Hough 교차검증 - 실패해도 장애물 결과 응답 자체는
+        # 살려야 하므로 별도로 try/except. 스캔(수 분) 대비 1~2초 추가되는 정도라
+        # 무시할 만하다 (world_map_algo.save_debug_visualizations 참고).
+        try:
+            debug_report = save_debug_visualizations(scan_dir, merged_points, ground_z, clusters)
+            for err in debug_report["errors"]:
+                self.get_logger().warn(f"debug visualization: {err}")
+        except Exception as e:
+            self.get_logger().warn(f"debug visualization failed: {e}")
 
         msg = build_world_map_update_msg(clusters, scan_dir, self.get_clock().now().to_msg())
         self.obstacle_pub.publish(msg)

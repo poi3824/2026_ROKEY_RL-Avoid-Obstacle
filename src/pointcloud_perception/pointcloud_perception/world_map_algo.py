@@ -17,6 +17,20 @@ try:
 except Exception:
     OPEN3D_AVAILABLE = False
 
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except Exception:
+    CV2_AVAILABLE = False
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except Exception:
+    MATPLOTLIB_AVAILABLE = False
+
 
 # =========================
 # 스캔 설정 (cobot_scan/world_map_scan_capture_ranged.py 와 동일한 캘리브레이션)
@@ -105,6 +119,26 @@ SAFETY_HEIGHT_MARGIN_M = 0.03
 # confidence = min(1.0, num_points / CONFIDENCE_NUM_POINTS_SCALE). 실제 스캔
 # 밀도 보고 튜닝 필요.
 CONFIDENCE_NUM_POINTS_SCALE = 1500.0
+
+# =========================
+# 디버그 시각화 / Hough 교차검증 (world_map_node.handle_update()가 스캔마다 자동 실행)
+# =========================
+# 스캔 자체가 로봇 이동 때문에 이미 수 분 걸리므로, PNG 저장 몇 장 추가되는 정도의
+# 비용(1~2초)은 무시할 만하다. 다만 시각화가 실패해도 실제 장애물 결과 응답에는
+# 영향이 없어야 하므로 호출부(world_map_node)에서 항상 try/except로 감싼다.
+ENABLE_TOPVIEW_DEBUG_PNG = True
+ENABLE_HOUGH_VALIDATION = True
+
+# Hough 검증은 cluster_points()가 이미 걸러낸 점이 아니라, 필터링 전 raw
+# point cloud를 그대로 이미지화한다 - 그래야 서로 다른 두 경로가 같은 답에
+# 도달하는지 보는 교차검증이 된다 (world_map_algo.cluster_points 참고).
+HOUGH_RESOLUTION_M = 0.005
+HOUGH_CLOSE_ITERATIONS = 2
+HOUGH_CANNY1 = 90.0
+HOUGH_PARAM2 = 18.0
+HOUGH_MIN_RADIUS_M = 0.02
+HOUGH_MAX_RADIUS_M = 0.09
+HOUGH_MATCH_MAX_DIST_M = 0.05
 
 # 나중에 DB/UI 연동을 생각해서 cobot_scan(다른 프로젝트의 범용 스캔 폴더)이
 # 아니라 이 워크스페이스 루트 하위 data/world_maps로 저장한다. src/ 밑이 아니라
@@ -992,6 +1026,24 @@ def compute_cluster_params(
     }
 
 
+def get_candidate_points(
+    points_xyz,
+    ground_z=None,
+    outlier_nb_neighbors=OBSTACLE_OUTLIER_NB_NEIGHBORS,
+    outlier_std_ratio=OBSTACLE_OUTLIER_STD_RATIO,
+):
+    """cluster_points()의 전처리(바닥 제거 -> flying pixel 제거)만 떼어낸 것.
+
+    save_debug_visualizations()의 top-view PNG가 cluster_points()와 정확히 같은
+    점 집합을 그리도록, 이 전처리를 cluster_points()와 공유한다.
+    """
+    candidate_points = remove_ground_band(points_xyz, ground_z)
+    candidate_points = remove_flying_pixel_outliers(
+        candidate_points, outlier_nb_neighbors, outlier_std_ratio
+    )
+    return candidate_points
+
+
 def cluster_points(
     points_xyz,
     ground_z=None,
@@ -1017,10 +1069,7 @@ def cluster_points(
     if points_xyz.shape[0] == 0:
         return []
 
-    candidate_points = remove_ground_band(points_xyz, ground_z)
-    candidate_points = remove_flying_pixel_outliers(
-        candidate_points, outlier_nb_neighbors, outlier_std_ratio
-    )
+    candidate_points = get_candidate_points(points_xyz, ground_z, outlier_nb_neighbors, outlier_std_ratio)
     if candidate_points.shape[0] == 0:
         return []
 
@@ -1038,6 +1087,213 @@ def cluster_points(
         ))
 
     return clusters
+
+
+def save_topview_debug_png(out_path, candidate_points, obstacles):
+    """base_link 기준 top-view(XY) PNG - solid=radius, dashed=safety_radius.
+
+    candidate_points/obstacles 모두 base_link 좌표를 그대로 쓰므로
+    (world_map_node.transform_cloud_to_base 참고), 이 PNG의 x/y축은 카메라가
+    아니라 base_link 기준이다.
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        raise RuntimeError("matplotlib이 없어서 top-view PNG를 저장할 수 없습니다.")
+
+    fig, ax = plt.subplots(figsize=(8, 10))
+
+    if candidate_points.shape[0] > 0:
+        ax.scatter(candidate_points[:, 0], candidate_points[:, 1], s=1, c="#4C72B0", alpha=0.3)
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, obs in enumerate(sorted(obstacles, key=lambda o: o["id"])):
+        cx, cy, _ = obs["centroid"]
+        color = color_cycle[i % len(color_cycle)]
+
+        ax.plot(cx, cy, marker="x", color=color, markersize=10, mew=2)
+        ax.text(cx + 0.01, cy, f"id={obs['id']}", fontsize=10)
+        ax.add_patch(plt.Circle((cx, cy), obs["radius"], fill=False, linewidth=2, linestyle="-", color="black"))
+        ax.add_patch(
+            plt.Circle((cx, cy), obs["safety_radius"], fill=False, linewidth=1.5, linestyle="--", color="black")
+        )
+
+    ax.set_xlabel("x in base_link (m)")
+    ax.set_ylabel("y in base_link (m)")
+    ax.set_title("Obstacle extraction top-view debug\nsolid=radius, dashed=safety_radius")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def build_height_image(points_xyz, ground_z, resolution_m=HOUGH_RESOLUTION_M, close_iterations=HOUGH_CLOSE_ITERATIONS):
+    """point cloud -> top-down 높이(z) 이미지. 픽셀값 = 그 칸의 최대 z를
+    [ground_z, z_max] 범위로 0~255 정규화한 값. 점 사이 빈틈은 morphological
+    closing으로 메운다.
+
+    반환: (img_u8, closed, blurred, x_min, y_min) - x_min/y_min은 픽셀(0,0)의
+    world 좌표.
+    """
+    if not CV2_AVAILABLE:
+        raise RuntimeError("opencv(cv2)가 없어서 height image를 만들 수 없습니다.")
+
+    x_min, x_max = points_xyz[:, 0].min(), points_xyz[:, 0].max()
+    y_min, y_max = points_xyz[:, 1].min(), points_xyz[:, 1].max()
+    w = int(np.ceil((x_max - x_min) / resolution_m)) + 1
+    h = int(np.ceil((y_max - y_min) / resolution_m)) + 1
+
+    height_img = np.zeros((h, w), dtype=np.float32)
+    px = ((points_xyz[:, 0] - x_min) / resolution_m).astype(int)
+    py = ((points_xyz[:, 1] - y_min) / resolution_m).astype(int)
+    np.maximum.at(height_img, (py, px), points_xyz[:, 2])
+
+    z_lo = ground_z if ground_z is not None else float(points_xyz[:, 2].min())
+    z_hi = float(points_xyz[:, 2].max())
+    span = max(z_hi - z_lo, 1e-6)
+    img_u8 = np.clip((height_img - z_lo) / span * 255, 0, 255).astype(np.uint8)
+
+    kernel = np.ones((3, 3), np.uint8)
+    closed = cv2.morphologyEx(img_u8, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
+    blurred = cv2.GaussianBlur(closed, (5, 5), 0)
+
+    return img_u8, closed, blurred, x_min, y_min
+
+
+def detect_circles_hough(
+    blurred_img, resolution_m, x_min, y_min,
+    canny1=HOUGH_CANNY1, hough_param2=HOUGH_PARAM2,
+    min_radius_m=HOUGH_MIN_RADIUS_M, max_radius_m=HOUGH_MAX_RADIUS_M,
+):
+    """blurred height image에서 cv2.HoughCircles로 원을 검출해 world 좌표로 변환.
+
+    반환: [{"center": [x,y], "radius": r}, ...] (world 단위, m)
+    """
+    if not CV2_AVAILABLE:
+        raise RuntimeError("opencv(cv2)가 없어서 Hough 원 검출을 할 수 없습니다.")
+
+    min_r_px = max(1, int(round(min_radius_m / resolution_m)))
+    max_r_px = int(round(max_radius_m / resolution_m))
+
+    circles = cv2.HoughCircles(
+        blurred_img, cv2.HOUGH_GRADIENT, dp=1, minDist=min_r_px,
+        param1=canny1, param2=hough_param2,
+        minRadius=min_r_px, maxRadius=max_r_px,
+    )
+    if circles is None:
+        return []
+
+    results = []
+    for cx_px, cy_px, r_px in circles[0]:
+        wx = x_min + cx_px * resolution_m
+        wy = y_min + cy_px * resolution_m
+        wr = r_px * resolution_m
+        results.append({"center": [float(wx), float(wy)], "radius": float(wr)})
+    return results
+
+
+def match_hough_to_clusters(hough_circles, clusters, max_dist_m=HOUGH_MATCH_MAX_DIST_M):
+    """각 cluster_points() 결과에 대해 가장 가까운 hough 원을 찾아 매칭한다."""
+    matches = []
+    used = set()
+    for c in clusters:
+        ccx, ccy = c["centroid"][0], c["centroid"][1]
+        best_idx, best_dist = None, None
+        for i, h in enumerate(hough_circles):
+            if i in used:
+                continue
+            d = ((h["center"][0] - ccx) ** 2 + (h["center"][1] - ccy) ** 2) ** 0.5
+            if best_dist is None or d < best_dist:
+                best_idx, best_dist = i, d
+        if best_idx is not None and best_dist <= max_dist_m:
+            used.add(best_idx)
+            matches.append({"cluster": c, "hough": hough_circles[best_idx], "center_dist_m": best_dist})
+        else:
+            matches.append({"cluster": c, "hough": None, "center_dist_m": None})
+    unmatched_hough = [h for i, h in enumerate(hough_circles) if i not in used]
+    return matches, unmatched_hough
+
+
+def save_hough_overlay_png(out_path, blurred_img, resolution_m, x_min, y_min, clusters, hough_circles):
+    """circle-fit(파란 실선) vs hough(빨간 점선)를 height image 위에 겹쳐 그린다."""
+    if not MATPLOTLIB_AVAILABLE:
+        raise RuntimeError("matplotlib이 없어서 hough 오버레이 PNG를 저장할 수 없습니다.")
+
+    fig, ax = plt.subplots(figsize=(8, 10))
+    ax.imshow(blurred_img, cmap="gray", origin="lower",
+              extent=[x_min, x_min + blurred_img.shape[1] * resolution_m,
+                      y_min, y_min + blurred_img.shape[0] * resolution_m])
+
+    for c in clusters:
+        cx, cy = c["centroid"][0], c["centroid"][1]
+        ax.add_patch(plt.Circle((cx, cy), c["radius"], fill=False, color="cyan", linewidth=2))
+        ax.plot(cx, cy, marker="+", color="cyan", markersize=8)
+
+    for h in hough_circles:
+        cx, cy = h["center"]
+        ax.add_patch(plt.Circle((cx, cy), h["radius"], fill=False, color="red", linewidth=1.5, linestyle="--"))
+        ax.plot(cx, cy, marker="x", color="red", markersize=6)
+
+    handles = [
+        plt.Line2D([0], [0], color="cyan", lw=2, label="circle-fit (point-based)"),
+        plt.Line2D([0], [0], color="red", lw=1.5, linestyle="--", label="Hough (image-based)"),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=8)
+    ax.set_xlabel("x in base_link (m)")
+    ax.set_ylabel("y in base_link (m)")
+    ax.set_title("circle-fit vs Hough circle cross-validation")
+    ax.set_aspect("equal")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def save_debug_visualizations(scan_dir, merged_points, ground_z, clusters):
+    """스캔 1회당 top-view 디버그 PNG + Hough 교차검증을 scan_dir에 저장한다.
+
+    world_map_node.handle_update()가 매 스캔마다 호출한다. ENABLE_TOPVIEW_DEBUG_PNG/
+    ENABLE_HOUGH_VALIDATION로 개별 on/off 가능. 호출부에서 이미 try/except로
+    감싸지만, 여기서도 단계별로 실패를 report에 기록해 하나가 실패해도 나머지는
+    계속 진행한다.
+
+    반환: {"topview_png": path 또는 None, "hough_png": path 또는 None,
+    "hough_matches": [...] 또는 None, "errors": [...]}
+    """
+    report = {"topview_png": None, "hough_png": None, "hough_matches": None, "errors": []}
+
+    if ENABLE_TOPVIEW_DEBUG_PNG:
+        try:
+            candidate_points = get_candidate_points(merged_points, ground_z)
+            png_path = os.path.join(scan_dir, "obstacle_topview_debug.png")
+            save_topview_debug_png(png_path, candidate_points, clusters)
+            report["topview_png"] = png_path
+        except Exception as e:
+            report["errors"].append(f"topview_png failed: {e}")
+
+    if ENABLE_HOUGH_VALIDATION:
+        try:
+            _, _, blurred, x_min, y_min = build_height_image(merged_points, ground_z)
+            hough_circles = detect_circles_hough(blurred, HOUGH_RESOLUTION_M, x_min, y_min)
+            matches, unmatched = match_hough_to_clusters(hough_circles, clusters)
+
+            png_path = os.path.join(scan_dir, "circle_fit_vs_hough_overlay.png")
+            save_hough_overlay_png(png_path, blurred, HOUGH_RESOLUTION_M, x_min, y_min, clusters, hough_circles)
+
+            report["hough_png"] = png_path
+            report["hough_matches"] = [
+                {
+                    "cluster_id": m["cluster"]["id"],
+                    "circle_fit_center": m["cluster"]["centroid"][:2],
+                    "circle_fit_radius_m": m["cluster"]["radius"],
+                    "hough_center": m["hough"]["center"] if m["hough"] else None,
+                    "hough_radius_m": m["hough"]["radius"] if m["hough"] else None,
+                    "center_dist_m": m["center_dist_m"],
+                }
+                for m in matches
+            ]
+        except Exception as e:
+            report["errors"].append(f"hough_validation failed: {e}")
+
+    return report
 
 
 def save_pose_cloud(out_dir, pose_index, points):

@@ -24,9 +24,6 @@ import json
 import os
 import sys
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 
@@ -46,40 +43,6 @@ def load_merged_points_and_ground_z(scan_dir):
 
     ground_z = (summary.get("ground_z_alignment") or {}).get("reference_ground_z")
     return merged_points, ground_z, summary
-
-
-def save_topview_debug_png(out_path, candidate_points, obstacles):
-    """base_link 기준 top-view(XY) PNG - solid=radius, dashed=safety_radius.
-
-    candidate_points/obstacles 모두 world_map_algo가 base_link로 변환한 좌표를
-    그대로 쓰므로(world_map_node.transform_cloud_to_base 참고), 이 PNG의 x/y축은
-    카메라가 아니라 base_link 기준이다.
-    """
-    fig, ax = plt.subplots(figsize=(8, 10))
-
-    if candidate_points.shape[0] > 0:
-        ax.scatter(candidate_points[:, 0], candidate_points[:, 1], s=1, c="#4C72B0", alpha=0.3)
-
-    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    for i, obs in enumerate(sorted(obstacles, key=lambda o: o["id"])):
-        cx, cy, _ = obs["centroid"]
-        color = color_cycle[i % len(color_cycle)]
-
-        ax.plot(cx, cy, marker="x", color=color, markersize=10, mew=2)
-        ax.text(cx + 0.01, cy, f"id={obs['id']}", fontsize=10)
-        ax.add_patch(plt.Circle((cx, cy), obs["radius"], fill=False, linewidth=2, linestyle="-", color="black"))
-        ax.add_patch(
-            plt.Circle((cx, cy), obs["safety_radius"], fill=False, linewidth=1.5, linestyle="--", color="black")
-        )
-
-    ax.set_xlabel("x in base_link (m)")
-    ax.set_ylabel("y in base_link (m)")
-    ax.set_title("Obstacle extraction top-view debug\nsolid=radius, dashed=safety_radius")
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=130)
-    plt.close(fig)
 
 
 def print_obstacles(label, obstacles):
@@ -160,10 +123,8 @@ def main():
     print_obstacles("바닥 제거 없이 cluster_points(ground_z=None)", baseline_clusters)
     print()
 
-    candidate_points = algo.remove_ground_band(merged_points, ground_z)
-    print(f"바닥 제거: {merged_points.shape[0]} -> {candidate_points.shape[0]} points")
-    candidate_points = algo.remove_flying_pixel_outliers(candidate_points, outlier_nb_neighbors, outlier_std_ratio)
-    print(f"flying pixel 제거: -> {candidate_points.shape[0]} points")
+    candidate_points = algo.get_candidate_points(merged_points, ground_z, outlier_nb_neighbors, outlier_std_ratio)
+    print(f"바닥/flying pixel 제거: {merged_points.shape[0]} -> {candidate_points.shape[0]} points")
     print()
 
     obstacles = algo.cluster_points(
@@ -183,7 +144,7 @@ def main():
         o3d.io.write_point_cloud(os.path.join(out_dir, "candidate_points.ply"), pcd)
 
     png_path = os.path.join(out_dir, "obstacle_topview_debug.png")
-    save_topview_debug_png(png_path, candidate_points, obstacles)
+    algo.save_topview_debug_png(png_path, candidate_points, obstacles)
     print(f"top-view PNG 저장: {png_path}")
 
     with open(os.path.join(out_dir, "obstacles.json"), "w", encoding="utf-8") as f:
