@@ -63,6 +63,35 @@ ROI_Z_MAX_M = 0.60
 CLUSTER_EPS_M = 0.03
 CLUSTER_MIN_POINTS = 5
 
+# =========================
+# 장애물(cylinder) 추출 - World Map Update 결과를 RL에 넘길 좌표로 변환
+# =========================
+# merged_points에는 바닥/테이블 point가 그대로 섞여 있어서, DBSCAN을 바로 돌리면
+# 테이블에 맞닿은 장애물 base가 테이블 point와 이어져(density-reachable) 테이블+
+# 장애물 전체가 하나의 거대 클러스터로 뭉친다 (2026-07-08: 실제 저장된 스캔으로
+# 확인 - 30916 point짜리 radius 0.36m 클러스터 1개 + 파편 클러스터 여러 개).
+# RANSAC으로 평면을 새로 잡는 대신 compute_ground_quality()가 이미 여러 pose의
+# ground z histogram으로 추정해둔 reference_ground_z를 재사용한다 - 바닥 기준을
+# 두 군데서 따로 추정하면 서로 어긋날 수 있어서 피한다.
+MIN_OBSTACLE_HEIGHT_ABOVE_GROUND_M = 0.015
+
+# max 대신 percentile을 쓰는 이유: RealSense 노이즈로 한두 점만 튀어도 radius가
+# 실제보다 크게 잡히는 걸 방지하기 위함.
+CYLINDER_RADIUS_PERCENTILE = 95
+
+# DBSCAN 자체가 통과시킨 아주 작은 파편 클러스터(노이즈에 가까움)를 한 번 더
+# 걸러낸다. CLUSTER_MIN_POINTS(DBSCAN core point 기준, 5)와는 역할이 다르다.
+MIN_CLUSTER_POINTS_FOR_OBSTACLE = 80
+
+# 실측 전 placeholder (2026-07-08) - 그리퍼/툴 반지름을 포함한 안전 여유가
+# 확정되면 이 값을 실측치로 교체해야 한다.
+SAFETY_RADIUS_MARGIN_M = 0.04
+SAFETY_HEIGHT_MARGIN_M = 0.03
+
+# confidence = min(1.0, num_points / CONFIDENCE_NUM_POINTS_SCALE). 실제 스캔
+# 밀도 보고 튜닝 필요.
+CONFIDENCE_NUM_POINTS_SCALE = 1500.0
+
 # 나중에 DB/UI 연동을 생각해서 cobot_scan(다른 프로젝트의 범용 스캔 폴더)이
 # 아니라 이 워크스페이스 루트 하위 data/world_maps로 저장한다. src/ 밑이 아니라
 # 워크스페이스 루트 형제 디렉토리인 이유는, point cloud/npy 산출물이 git으로
@@ -815,34 +844,124 @@ def build_map_with_icp(per_pose_points, poses, ground_quality):
     return final_map, mapping_report
 
 
-def cluster_points(points_xyz, eps=CLUSTER_EPS_M, min_points=CLUSTER_MIN_POINTS):
-    """DBSCAN으로 point cloud를 군집화해서 장애물 목록을 만든다.
-
-    반환: [{"id", "centroid": [x,y,z], "radius", "num_points"}, ...]
-    """
-    if points_xyz.shape[0] == 0:
-        return []
-
+def dbscan_labels(points_xyz, eps, min_points):
+    """DBSCAN 라벨(noise=-1)만 반환. cluster_points()가 이 위에서 필터/파라미터 추정을 한다."""
     if not OPEN3D_AVAILABLE:
         raise RuntimeError("open3d가 없어서 클러스터링을 할 수 없습니다.")
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points_xyz)
-    labels = np.array(pcd.cluster_dbscan(eps=eps, min_points=min_points))
+    return np.array(pcd.cluster_dbscan(eps=eps, min_points=min_points))
+
+
+def remove_ground_band(points_xyz, ground_z, margin_m=MIN_OBSTACLE_HEIGHT_ABOVE_GROUND_M):
+    """ground_z + margin 이하 point를 바닥/테이블로 보고 제거한다.
+
+    ground_z가 없으면(품질 게이트 실패 등) 아무것도 제거하지 않고 그대로 반환한다 -
+    잘못된 기준으로 장애물 point까지 잘라내는 것보다 안전하다.
+    """
+    if points_xyz.shape[0] == 0 or ground_z is None:
+        return points_xyz
+    mask = points_xyz[:, 2] > (ground_z + margin_m)
+    return points_xyz[mask]
+
+
+def compute_cluster_params(
+    member_points,
+    label,
+    ground_z=None,
+    safety_radius_margin=SAFETY_RADIUS_MARGIN_M,
+    safety_height_margin=SAFETY_HEIGHT_MARGIN_M,
+):
+    """클러스터 하나(원기둥 하나로 가정)를 RL/WorldMapObstacle에 넘길 파라미터로 변환한다.
+
+    center_x/center_y는 median(노이즈에 강건), radius는 percentile-95를 쓴다
+    (max는 튀는 점 하나에도 과대추정되기 쉽다).
+
+    height/center_z는 클러스터 자체 z_min이 아니라 ground_z(스캔 전체에서 이미
+    추정된 바닥 높이, compute_ground_quality 참고)를 기준으로 계산한다 - 이 스캔은
+    대부분 탑다운 시점이라 장애물 대부분이 상판 위주 point만 잡히고 실제 바닥까지
+    이어지는 point가 거의 없어서, 클러스터 자체 z_min을 쓰면 height가 심하게
+    과소추정된다. ground_z가 없으면 z_min을 그대로 fallback으로 쓴다.
+    """
+    x = member_points[:, 0]
+    y = member_points[:, 1]
+    z = member_points[:, 2]
+
+    cx = float(np.median(x))
+    cy = float(np.median(y))
+
+    xy_dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+    radius = float(np.percentile(xy_dist, CYLINDER_RADIUS_PERCENTILE))
+
+    z_min = float(z.min())
+    z_max = float(z.max())
+
+    if ground_z is not None:
+        height = max(0.0, z_max - float(ground_z))
+        center_z = float(ground_z) + height / 2.0
+    else:
+        height = max(0.0, z_max - z_min)
+        center_z = (z_min + z_max) / 2.0
+
+    safety_radius = radius + safety_radius_margin
+    safety_height = height + safety_height_margin
+
+    confidence = min(1.0, member_points.shape[0] / CONFIDENCE_NUM_POINTS_SCALE)
+
+    return {
+        "id": int(label),
+        "centroid": [cx, cy, center_z],
+        "radius": radius,
+        "height": height,
+        "z_min": z_min,
+        "z_max": z_max,
+        "safety_radius": safety_radius,
+        "safety_height": safety_height,
+        "shape_type": "cylinder",
+        "num_points": int(member_points.shape[0]),
+        "confidence": float(confidence),
+    }
+
+
+def cluster_points(
+    points_xyz,
+    ground_z=None,
+    eps=CLUSTER_EPS_M,
+    min_points=CLUSTER_MIN_POINTS,
+    min_cluster_points=MIN_CLUSTER_POINTS_FOR_OBSTACLE,
+    safety_radius_margin=SAFETY_RADIUS_MARGIN_M,
+    safety_height_margin=SAFETY_HEIGHT_MARGIN_M,
+):
+    """merged_points -> (바닥 제거 -> DBSCAN -> 작은 파편 제거 -> cylinder 파라미터 추정).
+
+    world_map_node가 /world_map/obstacles로 publish할 최종 장애물 목록을 만드는
+    진입점. ground_z를 안 주면 바닥 제거를 생략하고 z_min/z_max로만 height를 계산한다
+    (레거시 호출부 호환 - 다만 이 경우 테이블에 맞닿은 장애물이 테이블과 한 클러스터로
+    뭉칠 수 있다는 점을 알고 있어야 한다. handle_update()는 항상 ground_z를 넘긴다).
+
+    반환: [{"id", "centroid": [x,y,z], "radius", "height", "z_min", "z_max",
+    "safety_radius", "safety_height", "shape_type", "num_points", "confidence"}, ...]
+    """
+    if points_xyz.shape[0] == 0:
+        return []
+
+    candidate_points = remove_ground_band(points_xyz, ground_z)
+    if candidate_points.shape[0] == 0:
+        return []
+
+    labels = dbscan_labels(candidate_points, eps, min_points)
 
     clusters = []
     for label in sorted(set(labels.tolist())):
         if label < 0:
             continue  # noise
-        member_points = points_xyz[labels == label]
-        centroid = member_points.mean(axis=0)
-        radius = float(np.linalg.norm(member_points - centroid, axis=1).max())
-        clusters.append({
-            "id": int(label),
-            "centroid": centroid.tolist(),
-            "radius": radius,
-            "num_points": int(member_points.shape[0]),
-        })
+        member_points = candidate_points[labels == label]
+        if member_points.shape[0] < min_cluster_points:
+            continue
+        clusters.append(compute_cluster_params(
+            member_points, label, ground_z, safety_radius_margin, safety_height_margin
+        ))
 
     return clusters
 
