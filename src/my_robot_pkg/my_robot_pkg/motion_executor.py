@@ -222,7 +222,7 @@ class MotionExecutor:
             down_pos = target_pos[:2] + [surface_z + PLACE_CLEARANCE] + target_pos[3:]
         else:
             down_pos = target_pos
-            self.get_logger().warn("Depth를 못 읽어서 target_pos 그대로 내려감")
+            print("[MotionExecutor] Depth를 못 읽어서 target_pos 그대로 내려감")
 
         self.move_linear(down_pos)
         self.gripper.open_gripper()

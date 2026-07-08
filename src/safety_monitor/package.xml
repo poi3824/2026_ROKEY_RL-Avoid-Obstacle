@@ -1,19 +1,17 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>my_robot_pkg</name>
+  <name>safety_monitor</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>안전 감시 전담 노드 — 손 감지/음성 정지를 모아 /safety/state 방송, ESTOP 시 로봇 직접 정지</description>
   <maintainer email="poi3824@gmail.com">soo</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
-  <depend>od_msg</depend>
   <depend>dsr_msgs2</depend>
   <depend>robot_interfaces</depend>
-  <depend>ament_index_python</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

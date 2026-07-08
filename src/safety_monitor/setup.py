@@ -1,8 +1,6 @@
 from setuptools import find_packages, setup
-from glob import glob
-import os
 
-package_name = 'my_robot_pkg'
+package_name = 'safety_monitor'
 
 setup(
     name=package_name,
@@ -12,16 +10,12 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'resource'),
-            [f for f in glob('resource/*') if os.path.isfile(f)]),
-        (os.path.join('share', package_name, 'launch'),
-            glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='soo',
     maintainer_email='poi3824@gmail.com',
-    description='TODO: Package description',
+    description='안전 감시 전담 노드',
     license='TODO: License declaration',
     extras_require={
         'test': [
@@ -30,10 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'brain_node = my_robot_pkg.brain_node:main',
-            'motion_node = my_robot_pkg.motion_node:main',
-            'robot_action_node = my_robot_pkg.robot_action_node:main',
-            'gripper_width_probe = my_robot_pkg.gripper_width_probe:main',
+            'safety_monitor_node = safety_monitor.safety_monitor_node:main',
         ],
     },
 )

@@ -1,0 +1,12 @@
+# brain_node → motion_node: 이름있는 위치(home/scan/targetN)를 brain이
+# POSITION_COORDS로 풀어 좌표로 넘긴다. motion_node는 이 pose로 이동만 한다.
+# ---- goal ----
+float64[] pose        # [x, y, z, rx, ry, rz] (mm, deg, ZYZ)
+string label          # 로그/디버그용 이름 (선택)
+---
+# ---- result ----
+bool success
+string message
+---
+# ---- feedback ----
+string phase          # moving / done
