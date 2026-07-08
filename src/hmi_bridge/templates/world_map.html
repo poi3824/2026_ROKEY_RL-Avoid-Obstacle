@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>World Map / Obstacle Viewer</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/js/vendor/three.module.js"
+  }
+}
+</script>
+</head>
+<body>
+  <header>
+    <h1>World Map / Obstacle Viewer</h1>
+    <div class="controls">
+      <label for="scan-select">scan:</label>
+      <select id="scan-select"></select>
+      <button id="refresh-btn">새로고침</button>
+      <span id="status-text"></span>
+    </div>
+  </header>
+
+  <main>
+    <div id="viewer"></div>
+    <aside id="obstacle-panel">
+      <h2>Obstacles (base_link 기준)</h2>
+      <table id="obstacle-table">
+        <thead>
+          <tr>
+            <th>id</th><th>x</th><th>y</th><th>z</th>
+            <th>radius</th><th>height</th><th>conf</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </aside>
+  </main>
+
+  <script type="module" src="/static/js/world_map_viewer.js"></script>
+</body>
+</html>

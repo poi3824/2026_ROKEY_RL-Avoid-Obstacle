@@ -1,0 +1,94 @@
+:root {
+  color-scheme: light dark;
+  --bg: #111;
+  --fg: #eee;
+  --panel-bg: #1b1b1b;
+  --border: #333;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+button, select {
+  background: var(--panel-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+}
+
+button:hover { cursor: pointer; background: #262626; }
+
+#status-text {
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+#viewer {
+  flex: 1;
+  position: relative;
+}
+
+#viewer canvas {
+  display: block;
+}
+
+#obstacle-panel {
+  width: 360px;
+  border-left: 1px solid var(--border);
+  padding: 0.75rem;
+  overflow-y: auto;
+}
+
+#obstacle-panel h2 {
+  font-size: 0.95rem;
+  margin-top: 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+th, td {
+  text-align: right;
+  padding: 0.25rem 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+th:first-child, td:first-child { text-align: left; }
