@@ -377,6 +377,13 @@ RESUME / RESUME / RESUME / RESUME
                     self._latest_command = keyword_str
                 self._command_ready.set()
 
+            # 2026-07-08: 세션 루프 안에서 speech2text() 직후에 한 번 플러시해도,
+            # 그 뒤 LLM 호출(extract_keyword, 네트워크 왕복이라 몇 초 걸림) 동안
+            # 새로 쌓인 오디오가 안 비워진 채로 세션이 끝나버린다. 그래서 웨이크워드
+            # 대기로 돌아가기 직전에 한 번 더 비운다(실측: 이게 없으면 명령 처리
+            # 끝나자마자 안 부른 웨이크워드가 또 감지됨).
+            self._flush_mic_stream()
+
     def _flush_mic_stream(self):
         """STT(sounddevice) 녹음 동안 밀린 PyAudio 웨이크워드 스트림 버퍼를 비운다.
 

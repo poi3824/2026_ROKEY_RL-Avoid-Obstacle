@@ -260,8 +260,14 @@ class MotionNode(Node):
 
         result = MoveTo.Result()
         try:
-            self.motion.move_linear(pose)
-            self.motion.wait()
+            if label == "home":
+                # home은 대기 상태라 그리퍼가 열려 있어야 한다. 이전 pick이
+                # 실패로 끝나거나 중간에 중단돼 그리퍼가 닫힌 채 남아있을 수
+                # 있어서, home으로 갈 때는 항상 그리퍼를 열어준다.
+                self.motion.go_home(pose)
+            else:
+                self.motion.move_linear(pose)
+                self.motion.wait()
         except EmergencyStop:
             goal_handle.abort()
             result.success = False
