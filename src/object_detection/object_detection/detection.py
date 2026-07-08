@@ -27,6 +27,9 @@ DEPTH_ROI_HALF = 3  # (2*n+1)x(2*n+1) 정사각형 영역에서 median 계산
 # 반응은 느려지지만 서비스 자체가 안 막히는 게 우선이다.
 HAND_CHECK_INTERVAL_SEC = 0.5
 HAND_LABEL = "hand"
+# 2026-07-08: 파지 직후 닫힌 그리퍼(+쥔 물체)를 hand로 오탐하는 문제 대응으로
+# 기본값(0.5)보다 올림.
+HAND_CONFIDENCE_THRESHOLD = 0.65
 
 
 class ObjectDetectionNode(Node):
@@ -56,7 +59,7 @@ class ObjectDetectionNode(Node):
         try:
             rclpy.spin_once(self.img_node, timeout_sec=0)
             frame = self.img_node.get_color_frame()
-            detected = self.model.has_label(frame, HAND_LABEL)
+            detected = self.model.has_label(frame, HAND_LABEL, confidence_threshold=HAND_CONFIDENCE_THRESHOLD)
             self.hand_detected_pub.publish(Bool(data=detected))
         except Exception as e:
             self.get_logger().error(f"hand 체크 타이머 오류, 계속 진행함: {e}")
