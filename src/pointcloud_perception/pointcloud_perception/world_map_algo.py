@@ -897,6 +897,33 @@ def remove_flying_pixel_outliers(
     return np.asarray(pcd.points)
 
 
+def fit_circle_2d(x, y):
+    """(x,y) 점들에 원을 대수적으로 피팅한다 (Kåsa method, 반복 없는 closed-form).
+
+    x^2+y^2 = 2*a*x + 2*b*y + c 형태로 세우면 (a,b,c)에 대해 선형이라 최소자승으로
+    바로 풀린다. center=(a,b), radius=sqrt(c + a^2+b^2).
+
+    반환: (cx, cy, radius) 또는 실패 시 None.
+    """
+    if x.shape[0] < 3:
+        return None
+
+    A = np.column_stack([x, y, np.ones_like(x)])
+    b = x ** 2 + y ** 2
+    try:
+        sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+
+    a_coef, b_coef, c_coef = sol
+    cx, cy = a_coef / 2.0, b_coef / 2.0
+    r_sq = c_coef + cx ** 2 + cy ** 2
+    if not np.isfinite(r_sq) or r_sq <= 0:
+        return None
+
+    return float(cx), float(cy), float(np.sqrt(r_sq))
+
+
 def compute_cluster_params(
     member_points,
     label,
@@ -906,8 +933,15 @@ def compute_cluster_params(
 ):
     """클러스터 하나(원기둥 하나로 가정)를 RL/WorldMapObstacle에 넘길 파라미터로 변환한다.
 
-    center_x/center_y는 median(노이즈에 강건), radius는 percentile-95를 쓴다
-    (max는 튀는 점 하나에도 과대추정되기 쉽다).
+    center_x/center_y는 median이 아니라 원 피팅(fit_circle_2d)으로 구한다.
+    이 물체들은 위에서 보면 꽉 찬 원판이 아니라 속이 빈 링(컵 테두리 등)으로
+    잡히는데, 스캔이 링 둘레를 고르게 못 찍고 한쪽으로 치우쳐 찍으면 median
+    중심이 그쪽으로 쏠린다 (2026-07-08: 실제 스캔에서 각도별 반지름이 사인파
+    형태로 출렁이는 걸 확인 - 중심이 밀린 원의 전형적인 signature). 이 상태로
+    percentile-95를 반지름으로 쓰면 중심에서 가장 먼(반대쪽) 테두리까지 거리를
+    그대로 반지름으로 채택해버려 실제보다 크게 잡힌다. 원 피팅은 각도에 따른
+    반지름 편차(std)를 크게 줄여서 - 즉 더 진짜 원에 가깝게 - 중심을 잡는다.
+    원 피팅이 실패하면(점이 너무 적거나 퇴화된 경우) median으로 fallback한다.
 
     height/center_z는 클러스터 자체 z_min이 아니라 ground_z(스캔 전체에서 이미
     추정된 바닥 높이, compute_ground_quality 참고)를 기준으로 계산한다 - 이 스캔은
@@ -919,8 +953,11 @@ def compute_cluster_params(
     y = member_points[:, 1]
     z = member_points[:, 2]
 
-    cx = float(np.median(x))
-    cy = float(np.median(y))
+    fit = fit_circle_2d(x, y)
+    if fit is not None:
+        cx, cy, _fitted_radius = fit
+    else:
+        cx, cy = float(np.median(x)), float(np.median(y))
 
     xy_dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
     radius = float(np.percentile(xy_dist, CYLINDER_RADIUS_PERCENTILE))
