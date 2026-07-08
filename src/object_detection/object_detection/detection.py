@@ -25,7 +25,7 @@ DEPTH_ROI_HALF = 3  # (2*n+1)x(2*n+1) 정사각형 영역에서 median 계산
 # /get_3d_position 서비스 요청 처리까지 막아버린다(관측: 서비스 호출이 계속
 # 타임아웃남). 그래서 간격을 실제 추론 시간보다 여유 있게 늘렸다 — 손 감지
 # 반응은 느려지지만 서비스 자체가 안 막히는 게 우선이다.
-HAND_CHECK_INTERVAL_SEC = 1.5
+HAND_CHECK_INTERVAL_SEC = 0.5
 HAND_LABEL = "hand"
 
 

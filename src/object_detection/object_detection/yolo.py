@@ -15,7 +15,7 @@ import numpy as np
 PACKAGE_NAME = "object_detection"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 
-YOLO_MODEL_FILENAME = "best_seg1.pt"
+YOLO_MODEL_FILENAME = "250_model.pt"
 YOLO_CLASS_NAME_JSON = "class_name_tool.json"
 
 YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)
@@ -26,7 +26,7 @@ YOLO_JSON_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_CLASS_NAME_JSON)
 # 배치 추론하면 프레임 수(카메라 fps에 비례)가 그대로 추론 시간이 되어 5초
 # 타임아웃(GET_TARGET_TIMEOUT)을 훌쩍 넘긴다. 그래서 시간 기반이 아니라 개수
 # 기반으로 캡을 걸어 배치 크기(=추론 시간)를 예측 가능하게 만든다.
-FUSION_FRAME_COUNT = 3
+FUSION_FRAME_COUNT = 5
 GET_FRAMES_MAX_WAIT_SEC = 5.0  # 카메라가 멈춰있는 경우를 대비한 안전장치
 
 
