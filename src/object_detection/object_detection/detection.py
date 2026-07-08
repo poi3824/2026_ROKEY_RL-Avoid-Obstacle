@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -28,6 +30,14 @@ DEPTH_ROI_HALF = 3  # (2*n+1)x(2*n+1) 정사각형 영역에서 median 계산
 HAND_CHECK_INTERVAL_SEC = 1.5
 HAND_LABEL = "hand"
 
+# 2026-07-08: threshold(0.6) 근처에서 confidence가 흔들려서(실측: 같은 손이
+# 0.35~0.96 사이를 왔다갔다) 단일 프레임 판정만으로는 감지->해제->감지가
+# 반복돼 실제로는 못 움직이는데 "완전 정지"처럼 보이는 문제가 있었다. 그래서
+# 매 체크마다 찍는 프레임 수(1장, ~1초)는 그대로 두고, 최근 HAND_BUFFER_SIZE
+# 번의 단일 프레임 판정 이력을 다수결로 스무딩한다 — 체크 속도/자원 사용량은
+# 그대로면서 흔들림에는 강해진다.
+HAND_BUFFER_SIZE = 5
+
 
 class ObjectDetectionNode(Node):
     def __init__(self, model_name = 'yolo'):
@@ -43,20 +53,29 @@ class ObjectDetectionNode(Node):
             self.handle_get_depth
         )
         self.hand_detected_pub = self.create_publisher(Bool, 'hand_detected', 10)
+        self._hand_history = deque(maxlen=HAND_BUFFER_SIZE)
         self.create_timer(HAND_CHECK_INTERVAL_SEC, self._hand_check_timer_callback)
         self.get_logger().info("ObjectDetectionNode initialized.")
 
     def _hand_check_timer_callback(self):
-        """단일 프레임 1장으로 hand 여부만 빠르게 확인해 /hand_detected로 발행한다.
+        """단일 프레임 1장으로 hand 여부를 확인하고, 최근 판정 이력의 다수결로
+        스무딩해 /hand_detected로 발행한다.
 
         get_3d_position 서비스(픽용 멀티프레임 감지)와 완전히 분리된 경로라
         pick 흐름과 자원 경합이 없다. img_node는 여기서 직접 spin해서 프레임을
         최신 상태로 유지한다(그 전엔 실제 detect 요청이 있을 때만 spin됐음).
+
+        다수결(HAND_BUFFER_SIZE 참고)은 매 체크마다 새로 여러 프레임을 찍는 게
+        아니라, 지금까지처럼 1장씩 찍은 결과를 이력에 쌓아 판단만 스무딩한다 —
+        체크 속도/자원 사용량은 그대로다. 이력이 아직 안 찼을 때(막 시작 시)도
+        같은 식(과반)으로 계산되므로 별도 예외 처리가 필요 없다.
         """
         try:
             rclpy.spin_once(self.img_node, timeout_sec=0)
             frame = self.img_node.get_color_frame()
-            detected = self.model.has_label(frame, HAND_LABEL)
+            detected_this_frame = self.model.has_label(frame, HAND_LABEL)
+            self._hand_history.append(detected_this_frame)
+            detected = sum(self._hand_history) > len(self._hand_history) / 2
             self.hand_detected_pub.publish(Bool(data=detected))
         except Exception as e:
             self.get_logger().error(f"hand 체크 타이머 오류, 계속 진행함: {e}")
