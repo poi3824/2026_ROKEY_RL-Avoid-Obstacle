@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 
 import rclpy
 import pyaudio
@@ -54,6 +55,12 @@ VOICE_ESTOP_TOPIC = "/voice/estop"
 # STT 텍스트에 이 단어가 있으면 LLM 왕복을 기다리지 않고 바로 응급정지를 호출한다.
 # STOP은 안전(즉시성)이 최우선이라 로컬 문자열 매칭으로 처리한다.
 STOP_KEYWORDS = ("정지", "멈춰", "스톱", "중지", "그만")
+
+# 2026-07-08: 웨이크워드 한 번으로 여러 명령을 연달아 받는 세션의 최대 유지 시간(초).
+# 원래는 "빈 STT 결과(침묵)"가 나오면 세션을 끝내려 했는데, 노이즈가 심한 환경에서는
+# Whisper가 배경 소음도 뭔가로 전사해버려서 침묵 판정이 잘 안 되고, 그러면 세션이
+# 끝없이 이어질 수 있다. 그래서 세션 종료 기준을 "침묵"이 아니라 경과 시간으로 건다.
+MAX_SESSION_SEC = 5.0
 
 # 2026-07-08: RESUME(재개)은 STOP과 반대로 즉시성보다 오탐 방지가 더 중요하다
 # (이 마이크 환경은 인식 품질이 낮아 로컬 문자열 매칭만으로 판단하면 잡음을 "다시
@@ -294,6 +301,13 @@ RESUME / RESUME / RESUME / RESUME
         일반 명령(RESUME 포함)은 self._latest_command에 저장해 get_keyword()가
         꺼내가게 한다 — RESUME은 STOP과 달리 여기서 즉시 처리하지 않고 반드시
         LLM 분류 결과를 brain_node로 넘겨서 처리한다(오탐 방지).
+
+        2026-07-08: 웨이크워드는 세션당 한 번만 필요하다. 명령을 하나 처리한
+        뒤에도 곧바로 웨이크워드 대기로 돌아가지 않고, MAX_SESSION_SEC 동안은
+        안쪽 세션 루프에서 계속 STT를 반복한다 — 그래야 "빨간 통 1번으로" 하고
+        이어서 "파란 통 2번으로"처럼 연달아 명령할 때 매번 웨이크워드를 다시
+        말할 필요가 없다. (침묵이 아니라 경과 시간으로 세션을 끊는 이유는
+        MAX_SESSION_SEC 정의 옆 주석 참고.)
         """
         try:
             print("open stream")
@@ -308,53 +322,59 @@ RESUME / RESUME / RESUME / RESUME
             while not self.wakeup_word.is_wakeup():
                 pass
 
-            # STT --> Keyword Extract --> Embedding
-            output_message = self.stt.speech2text()
-            self.get_logger().info(f"STT 인식 결과: '{output_message}'")
+            self.get_logger().info("헬로우 로키 감지 - 녹음 시작")
 
-            # Whisper는 무음/잡음 구간에서 빈 문자열이나 아주 짧은 환청을 자주 낸다.
-            # 그대로 LLM에 넣으면 UNKNOWN이나 엉뚱한 STOP으로 파싱돼 오작동(특히
-            # 의도치 않은 응급정지)하므로 여기서 먼저 걸러낸다.
-            if len(output_message.strip()) < 2:
-                self.get_logger().warn("STT 결과가 비었/너무 짧음 — 무시")
-                continue
+            # 웨이크워드 세션: MAX_SESSION_SEC 동안은 재웨이크 없이 계속 듣는다.
+            session_start = time.time()
+            while rclpy.ok() and (time.time() - session_start) < MAX_SESSION_SEC:
+                # STT --> Keyword Extract --> Embedding
+                output_message = self.stt.speech2text()
+                self.get_logger().info(f"STT 인식 결과: '{output_message}'")
 
-            if any(word in output_message for word in STOP_KEYWORDS):
-                self.get_logger().warn(f"정지 키워드 감지(로컬): '{output_message}' -> 응급정지 호출")
-                self._call_emergency_stop()
-                continue
+                # Whisper는 무음/잡음 구간에서 빈 문자열이나 아주 짧은 환청을 자주
+                # 낸다. 이번 라운드만 건너뛰고(세션은 유지, 시간으로만 종료) LLM에
+                # 안 넣는다 — 그대로 넣으면 UNKNOWN이나 엉뚱한 STOP으로 파싱돼
+                # 오작동할 수 있다.
+                if len(output_message.strip()) < 2:
+                    self.get_logger().warn("STT 결과가 비었/너무 짧음 — 이번 라운드 무시")
+                    continue
 
-            obj, source, target, return_pos = self.extract_keyword(output_message)
+                if any(word in output_message for word in STOP_KEYWORDS):
+                    self.get_logger().warn(f"정지 키워드 감지(로컬): '{output_message}' -> 응급정지 호출")
+                    self._call_emergency_stop()
+                    continue
 
-            # extract_keyword가 파싱에 실패해 None을 반환한 경우 방어 처리
-            # (원래 코드는 이 경우에도 " ".join(keyword)를 호출해 TypeError가 발생했음)
-            if obj is None:
-                self.get_logger().error("Failed to extract keyword from LLM response")
-                continue
+                obj, source, target, return_pos = self.extract_keyword(output_message)
 
-            if "STOP" in obj:  # LLM이 STOP으로 파싱한 경우에 대한 2차 방어
-                self.get_logger().warn(
-                    f"정지 키워드 감지(LLM): STT='{output_message}' -> 응급정지 호출"
+                # extract_keyword가 파싱에 실패해 None을 반환한 경우 방어 처리
+                # (원래 코드는 이 경우에도 " ".join(keyword)를 호출해 TypeError가 발생했음)
+                if obj is None:
+                    self.get_logger().error("Failed to extract keyword from LLM response")
+                    continue
+
+                if "STOP" in obj:  # LLM이 STOP으로 파싱한 경우에 대한 2차 방어
+                    self.get_logger().warn(
+                        f"정지 키워드 감지(LLM): STT='{output_message}' -> 응급정지 호출"
+                    )
+                    self._call_emergency_stop()
+                    continue
+
+                # obj, source, target, return_pos는 각각 리스트이므로
+                # " ".join(keyword)처럼 튜플을 바로 join하면
+                # 각 원소가 str이 아닌 list라 TypeError가 발생한다.
+                # 따라서 모든 리스트를 하나의 문자열 리스트로 평탄화(flatten)한 뒤 join한다.
+                keyword_str = (
+                    f"{' '.join(obj)} / "
+                    f"{' '.join(source)} / "
+                    f"{' '.join(target)} / "
+                    f"{' '.join(return_pos)}"
                 )
-                self._call_emergency_stop()
-                continue
 
-            # obj, source, target, return_pos는 각각 리스트이므로
-            # " ".join(keyword)처럼 튜플을 바로 join하면
-            # 각 원소가 str이 아닌 list라 TypeError가 발생한다.
-            # 따라서 모든 리스트를 하나의 문자열 리스트로 평탄화(flatten)한 뒤 join한다.
-            keyword_str = (
-                f"{' '.join(obj)} / "
-                f"{' '.join(source)} / "
-                f"{' '.join(target)} / "
-                f"{' '.join(return_pos)}"
-            )
+                self.get_logger().warn(f"Detected tools: {keyword_str}")
 
-            self.get_logger().warn(f"Detected tools: {keyword_str}")
-
-            with self._lock:
-                self._latest_command = keyword_str
-            self._command_ready.set()
+                with self._lock:
+                    self._latest_command = keyword_str
+                self._command_ready.set()
 
     def _call_emergency_stop(self):
         """2026-07-07: /voice/estop 토픽에 True를 발행한다 (fire-and-forget).
