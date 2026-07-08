@@ -30,10 +30,9 @@ class WakeupWord:
         audio_chunk = resample(audio_chunk, int(len(audio_chunk) * 16000 / 48000))
         outputs = self.model.predict(audio_chunk, threshold=0.1)
         confidence = outputs[self.model_name]
-        print("confidence: ", confidence)
         # Wakeword 탐지
         if confidence > 0.3:
-            print("Wakeword detected!")
+            print("Wakeword detected!", flush=True)
             return True
         return False
 
