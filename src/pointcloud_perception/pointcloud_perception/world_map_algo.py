@@ -75,6 +75,20 @@ CLUSTER_MIN_POINTS = 5
 # 두 군데서 따로 추정하면 서로 어긋날 수 있어서 피한다.
 MIN_OBSTACLE_HEIGHT_ABOVE_GROUND_M = 0.015
 
+# 바닥 제거만으로는 서로 떨어진 물체 두 개가 한 클러스터로 남을 수 있다
+# (2026-07-08: 실제 라이브 스캔에서 확인 - 밑단/윗단만 보면 완전히 분리된 원
+# 두 개인데, 중간 높이(z 6~15cm)에 실제 표면과 무관한 성긴 점들이 다리를 놓아서
+# DBSCAN이 하나로 이어붙임). RealSense가 depth discontinuity(물체 실루엣 경계)
+# 에서 만드는 flying pixel 노이즈가 원인으로 보인다 - 여러 pose에 걸쳐 조금씩
+# 나오지만, 실제 표면 점은 여러 pose가 같은 위치를 반복 관측해 국소 밀도가
+# 훨씬 높은 반면 flying pixel은 pose마다 위치가 달라 국소 밀도가 낮다. 그래서
+# statistical outlier removal로 이걸 걸러낸다 - std_ratio를 기존 ICP 전처리용
+# (2.0)보다 세게(1.0) 줘야 실제로 갈라짐을 확인함. 다만 이걸로도 등록 오차가
+# 큰(TF drift 심한) 스캔은 완전히 안 갈라질 수 있다 - 그 경우는 별개 문제(ICP
+# 매핑 품질)로 다뤄야 한다.
+OBSTACLE_OUTLIER_NB_NEIGHBORS = 20
+OBSTACLE_OUTLIER_STD_RATIO = 1.0
+
 # max 대신 percentile을 쓰는 이유: RealSense 노이즈로 한두 점만 튀어도 radius가
 # 실제보다 크게 잡히는 걸 방지하기 위함.
 CYLINDER_RADIUS_PERCENTILE = 95
@@ -866,6 +880,23 @@ def remove_ground_band(points_xyz, ground_z, margin_m=MIN_OBSTACLE_HEIGHT_ABOVE_
     return points_xyz[mask]
 
 
+def remove_flying_pixel_outliers(
+    points_xyz,
+    nb_neighbors=OBSTACLE_OUTLIER_NB_NEIGHBORS,
+    std_ratio=OBSTACLE_OUTLIER_STD_RATIO,
+):
+    """DBSCAN 전에 RealSense flying pixel(물체 경계 depth 불연속에서 생기는 노이즈)을
+    제거한다. 실제 표면 점은 여러 pose가 반복 관측해 국소 밀도가 높지만, flying
+    pixel은 pose마다 위치가 달라 국소 밀도가 낮다는 점을 이용한다.
+    """
+    if not OPEN3D_AVAILABLE or points_xyz.shape[0] == 0:
+        return points_xyz
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points_xyz)
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    return np.asarray(pcd.points)
+
+
 def compute_cluster_params(
     member_points,
     label,
@@ -932,8 +963,11 @@ def cluster_points(
     min_cluster_points=MIN_CLUSTER_POINTS_FOR_OBSTACLE,
     safety_radius_margin=SAFETY_RADIUS_MARGIN_M,
     safety_height_margin=SAFETY_HEIGHT_MARGIN_M,
+    outlier_nb_neighbors=OBSTACLE_OUTLIER_NB_NEIGHBORS,
+    outlier_std_ratio=OBSTACLE_OUTLIER_STD_RATIO,
 ):
-    """merged_points -> (바닥 제거 -> DBSCAN -> 작은 파편 제거 -> cylinder 파라미터 추정).
+    """merged_points -> (바닥 제거 -> flying pixel 제거 -> DBSCAN -> 작은 파편 제거 ->
+    cylinder 파라미터 추정).
 
     world_map_node가 /world_map/obstacles로 publish할 최종 장애물 목록을 만드는
     진입점. ground_z를 안 주면 바닥 제거를 생략하고 z_min/z_max로만 height를 계산한다
@@ -947,6 +981,9 @@ def cluster_points(
         return []
 
     candidate_points = remove_ground_band(points_xyz, ground_z)
+    candidate_points = remove_flying_pixel_outliers(
+        candidate_points, outlier_nb_neighbors, outlier_std_ratio
+    )
     if candidate_points.shape[0] == 0:
         return []
 

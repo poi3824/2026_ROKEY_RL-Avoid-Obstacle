@@ -2,8 +2,8 @@
 """로봇 없이, 이미 저장된 world_map_update_* 폴더로 장애물(cylinder) 추출을
 오프라인 튜닝하는 스크립트.
 
-world_map_algo.cluster_points()가 하는 일(바닥 제거 -> DBSCAN -> 작은 파편 제거 ->
-cylinder 파라미터 추정)을 merged_base_roi.npy + world_map_summary.json의
+world_map_algo.cluster_points()가 하는 일(바닥 제거 -> flying pixel 제거 -> DBSCAN ->
+작은 파편 제거 -> cylinder 파라미터 추정)을 merged_base_roi.npy + world_map_summary.json의
 reference_ground_z만으로 재현한다. 원본 scan_dir은 건드리지 않고, 결과는
 <scan_dir>/obstacle_extraction_offline_result/ 에 저장한다.
 
@@ -110,6 +110,8 @@ def main():
     )
     parser.add_argument("--safety-radius-margin", type=float, default=None, help="SAFETY_RADIUS_MARGIN_M override")
     parser.add_argument("--safety-height-margin", type=float, default=None, help="SAFETY_HEIGHT_MARGIN_M override")
+    parser.add_argument("--outlier-nb-neighbors", type=int, default=None, help="OBSTACLE_OUTLIER_NB_NEIGHBORS override")
+    parser.add_argument("--outlier-std-ratio", type=float, default=None, help="OBSTACLE_OUTLIER_STD_RATIO override")
     args = parser.parse_args()
 
     scan_dir = os.path.expanduser(args.scan_dir)
@@ -128,13 +130,22 @@ def main():
         args.safety_height_margin if args.safety_height_margin is not None
         else algo.SAFETY_HEIGHT_MARGIN_M
     )
+    outlier_nb_neighbors = (
+        args.outlier_nb_neighbors if args.outlier_nb_neighbors is not None
+        else algo.OBSTACLE_OUTLIER_NB_NEIGHBORS
+    )
+    outlier_std_ratio = (
+        args.outlier_std_ratio if args.outlier_std_ratio is not None
+        else algo.OBSTACLE_OUTLIER_STD_RATIO
+    )
 
     merged_points, ground_z, summary = load_merged_points_and_ground_z(scan_dir)
     print(f"Loaded merged_base_roi.npy: {merged_points.shape[0]} points from {scan_dir}")
     print(f"ground_z={ground_z}")
     print(
         f"eps={eps}, min_points={min_points}, min_cluster_points={min_cluster_points}, "
-        f"safety_radius_margin={safety_radius_margin}, safety_height_margin={safety_height_margin}"
+        f"safety_radius_margin={safety_radius_margin}, safety_height_margin={safety_height_margin}, "
+        f"outlier_nb_neighbors={outlier_nb_neighbors}, outlier_std_ratio={outlier_std_ratio}"
     )
     print()
 
@@ -151,14 +162,17 @@ def main():
 
     candidate_points = algo.remove_ground_band(merged_points, ground_z)
     print(f"바닥 제거: {merged_points.shape[0]} -> {candidate_points.shape[0]} points")
+    candidate_points = algo.remove_flying_pixel_outliers(candidate_points, outlier_nb_neighbors, outlier_std_ratio)
+    print(f"flying pixel 제거: -> {candidate_points.shape[0]} points")
     print()
 
     obstacles = algo.cluster_points(
         merged_points, ground_z=ground_z,
         eps=eps, min_points=min_points, min_cluster_points=min_cluster_points,
         safety_radius_margin=safety_radius_margin, safety_height_margin=safety_height_margin,
+        outlier_nb_neighbors=outlier_nb_neighbors, outlier_std_ratio=outlier_std_ratio,
     )
-    print_obstacles("cluster_points(ground_z=<추정값>) (바닥 제거 + 파편 필터 후)", obstacles)
+    print_obstacles("cluster_points(ground_z=<추정값>) (바닥/flying pixel 제거 + 파편 필터 후)", obstacles)
 
     out_dir = os.path.join(scan_dir, "obstacle_extraction_offline_result")
     os.makedirs(out_dir, exist_ok=True)
@@ -182,6 +196,8 @@ def main():
                     "min_cluster_points": min_cluster_points,
                     "safety_radius_margin": safety_radius_margin,
                     "safety_height_margin": safety_height_margin,
+                    "outlier_nb_neighbors": outlier_nb_neighbors,
+                    "outlier_std_ratio": outlier_std_ratio,
                 },
                 "obstacles": obstacles,
             },
