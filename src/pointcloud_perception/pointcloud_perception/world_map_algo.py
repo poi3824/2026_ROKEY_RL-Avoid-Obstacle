@@ -61,7 +61,7 @@ ROI_Z_MAX_M = 0.60
 
 # DBSCAN 클러스터링 파라미터. 실제 스캔 밀도 보고 튜닝 필요.
 CLUSTER_EPS_M = 0.03
-CLUSTER_MIN_POINTS = 15
+CLUSTER_MIN_POINTS = 5
 
 # 나중에 DB/UI 연동을 생각해서 cobot_scan(다른 프로젝트의 범용 스캔 폴더)이
 # 아니라 이 워크스페이스 루트 하위 data/world_maps로 저장한다. src/ 밑이 아니라
