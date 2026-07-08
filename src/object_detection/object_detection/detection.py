@@ -3,6 +3,8 @@ from collections import deque
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from typing import Any, Callable, Optional, Tuple
 
 from ament_index_python.packages import get_package_share_directory
@@ -46,14 +48,25 @@ class ObjectDetectionNode(Node):
         self.intrinsics = self._wait_for_valid_data(
             self.img_node.get_camera_intrinsic, "camera intrinsics"
         )
+        # 2026-07-08: 손 감지 타이머와 get_3d_position 서비스가 하나의 싱글스레드
+        # executor를 나눠 쓰던 게 문제였다 — 손 감지가 자주 돌 때 get_3d_position
+        # 요청이 뒤에 밀려 GET_TARGET_TIMEOUT(motion_node 기준)을 넘겨 pick이
+        # 계속 실패했다(실측: 6.0~6.02초 만에 정확히 타임아웃). 그래서 둘을
+        # 별도 콜백그룹으로 나누고 MultiThreadedExecutor로 진짜 동시에 돌린다.
+        self._depth_cbg = MutuallyExclusiveCallbackGroup()
+        self._hand_cbg = MutuallyExclusiveCallbackGroup()
         self.create_service(
             SrvDepthPosition,
             'get_3d_position',
-            self.handle_get_depth
+            self.handle_get_depth,
+            callback_group=self._depth_cbg,
         )
         self.hand_detected_pub = self.create_publisher(Bool, 'hand_detected', 10)
         self._hand_history = deque(maxlen=HAND_BUFFER_SIZE)
-        self.create_timer(HAND_CHECK_INTERVAL_SEC, self._hand_check_timer_callback)
+        self.create_timer(
+            HAND_CHECK_INTERVAL_SEC, self._hand_check_timer_callback,
+            callback_group=self._hand_cbg,
+        )
         self.get_logger().info("ObjectDetectionNode initialized.")
 
     def _hand_check_timer_callback(self):
@@ -70,7 +83,8 @@ class ObjectDetectionNode(Node):
         같은 식(과반)으로 계산되므로 별도 예외 처리가 필요 없다.
         """
         try:
-            rclpy.spin_once(self.img_node, timeout_sec=0)
+            with self.img_node.spin_lock:
+                rclpy.spin_once(self.img_node, timeout_sec=0)
             frame = self.img_node.get_color_frame()
             detected_this_frame = self.model.has_label(frame, HAND_LABEL)
             self._hand_history.append(detected_this_frame)
@@ -98,7 +112,8 @@ class ObjectDetectionNode(Node):
 
         angle_deg는 seg 모델이 아니거나 마스크를 못 찾은 경우 0.0(회전 없음)이 된다.
         """
-        rclpy.spin_once(self.img_node)
+        with self.img_node.spin_lock:
+            rclpy.spin_once(self.img_node)
 
         angle_deg = 0.0
         if target == "":
@@ -155,7 +170,8 @@ class ObjectDetectionNode(Node):
         """getter 함수가 유효한 데이터를 반환할 때까지 spin 하며 재시도합니다."""
         data = getter()
         while data is None or (isinstance(data, np.ndarray) and not data.any()):
-            rclpy.spin_once(self.img_node)
+            with self.img_node.spin_lock:
+                rclpy.spin_once(self.img_node)
             self.get_logger().info(f"Retry getting {description}.")
             data = getter()
         return data
@@ -176,8 +192,10 @@ class ObjectDetectionNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = ObjectDetectionNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
         node.destroy_node()
         rclpy.shutdown()

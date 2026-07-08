@@ -184,8 +184,6 @@ class MotionExecutor:
                 down_pos = source_pos
 
             self.move_linear(down_pos)
-            
-            self.move_linear(source_pos)
 
             if feedback_cb:
                 feedback_cb("gripping", attempt + 1)

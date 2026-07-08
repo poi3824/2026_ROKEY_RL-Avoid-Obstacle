@@ -20,6 +20,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -267,7 +268,7 @@ class MotionNode(Node):
             result.message = "emergency stop"
             return result
         except Exception as e:
-            self.get_logger().error(f"[MoveTo] 처리 중 예외 발생, goal 중단: {e}")
+            self.get_logger().error(f"[MoveTo] 처리 중 예외 발생, goal 중단: {e}\n{traceback.format_exc()}")
             self._safe_terminate(goal_handle)
             result.success = False
             result.message = f"internal error: {e}"
@@ -319,7 +320,7 @@ class MotionNode(Node):
             result.message = "emergency stop"
             return result
         except Exception as e:
-            self.get_logger().error(f"[Pick] 처리 중 예외 발생, goal 중단: {e}")
+            self.get_logger().error(f"[Pick] 처리 중 예외 발생, goal 중단: {e}\n{traceback.format_exc()}")
             self._safe_terminate(goal_handle)
             result.success = False
             result.picked_pose = []
@@ -362,7 +363,7 @@ class MotionNode(Node):
             result.message = "emergency stop"
             return result
         except Exception as e:
-            self.get_logger().error(f"[Place] 처리 중 예외 발생, goal 중단: {e}")
+            self.get_logger().error(f"[Place] 처리 중 예외 발생, goal 중단: {e}\n{traceback.format_exc()}")
             self._safe_terminate(goal_handle)
             result.success = False
             result.message = f"internal error: {e}"

@@ -2,6 +2,7 @@
 import os
 import json
 import math
+import threading
 import time
 from collections import Counter
 
@@ -36,6 +37,12 @@ class YoloModel:
         with open(YOLO_JSON_PATH, "r", encoding="utf-8") as file:
             class_dict = json.load(file)
             self.reversed_class_dict = {v: int(k) for k, v in class_dict.items()}
+        # 2026-07-08: object_detection_node가 MultiThreadedExecutor로 바뀌면서
+        # hand 감지(has_label)와 pick 감지(get_best_detection)가 서로 다른
+        # 스레드에서 동시에 같은 self.model을 호출할 수 있게 됐다. ultralytics
+        # 추론 자체는 보통 스레드 세이프하지만, 확실히 하기 위해 모델 호출만
+        # 이 락으로 직렬화한다(느린 프레임 수집 단계는 락 밖이라 서로 안 막음).
+        self._model_lock = threading.Lock()
 
     def get_frames(self, img_node, count=FUSION_FRAME_COUNT, max_wait_sec=GET_FRAMES_MAX_WAIT_SEC):
         """count장을 채울 때까지 프레임을 모은다(카메라가 멈춰있으면 max_wait_sec에서 포기)."""
@@ -43,7 +50,8 @@ class YoloModel:
         frames = {}
 
         while time.time() < end_time and len(frames) < count:
-            rclpy.spin_once(img_node)
+            with img_node.spin_lock:
+                rclpy.spin_once(img_node)
             frame = img_node.get_color_frame()
             stamp = img_node.get_color_frame_stamp()
             if frame is not None:
@@ -67,7 +75,8 @@ class YoloModel:
         if frame is None:
             return False
         label_id = self.reversed_class_dict[target]
-        results = self.model([frame], verbose=False)
+        with self._model_lock:
+            results = self.model([frame], verbose=False)
         detected = False
         for res in results:
             for score, label in zip(res.boxes.conf.tolist(), res.boxes.cls.tolist()):
@@ -90,12 +99,14 @@ class YoloModel:
         angle_deg는 None -> 0.0(회전 없음), mask_center는 None -> bbox 중심으로
         처리한다.
         """
-        rclpy.spin_once(img_node)
+        with img_node.spin_lock:
+            rclpy.spin_once(img_node)
         frames = self.get_frames(img_node)
         if not frames:  # Check if frames are empty
             return None, None, None, None
 
-        results = self.model(frames, verbose=False)
+        with self._model_lock:
+            results = self.model(frames, verbose=False)
         print("classes: ")
         print(results[0].names)
         detections = self._aggregate_detections(results)
