@@ -7,6 +7,13 @@ cylinder 파라미터 추정)을 merged_base_roi.npy + world_map_summary.json의
 reference_ground_z만으로 재현한다. 원본 scan_dir은 건드리지 않고, 결과는
 <scan_dir>/obstacle_extraction_offline_result/ 에 저장한다.
 
+merged_base_roi.npy는 world_map_node의 transform_cloud_to_base()를 거쳐 이미
+base_link 기준으로 변환+ROI crop된 좌표이므로, 여기서 그리는 top-view PNG의
+x/y축도 base_link 기준이다 (카메라 프레임 raw .ply를 그대로 시각화하는 것과는
+다르다).
+
+matplotlib이 추가로 필요하다 (open3d/numpy 외).
+
 사용법:
     python3 offline_obstacle_experiment.py <scan_dir> \
         [--eps 0.03] [--min-points 5] [--min-cluster-points 80] \
@@ -17,6 +24,9 @@ import json
 import os
 import sys
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 
@@ -36,6 +46,40 @@ def load_merged_points_and_ground_z(scan_dir):
 
     ground_z = (summary.get("ground_z_alignment") or {}).get("reference_ground_z")
     return merged_points, ground_z, summary
+
+
+def save_topview_debug_png(out_path, candidate_points, obstacles):
+    """base_link 기준 top-view(XY) PNG - solid=radius, dashed=safety_radius.
+
+    candidate_points/obstacles 모두 world_map_algo가 base_link로 변환한 좌표를
+    그대로 쓰므로(world_map_node.transform_cloud_to_base 참고), 이 PNG의 x/y축은
+    카메라가 아니라 base_link 기준이다.
+    """
+    fig, ax = plt.subplots(figsize=(8, 10))
+
+    if candidate_points.shape[0] > 0:
+        ax.scatter(candidate_points[:, 0], candidate_points[:, 1], s=1, c="#4C72B0", alpha=0.3)
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, obs in enumerate(sorted(obstacles, key=lambda o: o["id"])):
+        cx, cy, _ = obs["centroid"]
+        color = color_cycle[i % len(color_cycle)]
+
+        ax.plot(cx, cy, marker="x", color=color, markersize=10, mew=2)
+        ax.text(cx + 0.01, cy, f"id={obs['id']}", fontsize=10)
+        ax.add_patch(plt.Circle((cx, cy), obs["radius"], fill=False, linewidth=2, linestyle="-", color="black"))
+        ax.add_patch(
+            plt.Circle((cx, cy), obs["safety_radius"], fill=False, linewidth=1.5, linestyle="--", color="black")
+        )
+
+    ax.set_xlabel("x in base_link (m)")
+    ax.set_ylabel("y in base_link (m)")
+    ax.set_title("Obstacle extraction top-view debug\nsolid=radius, dashed=safety_radius")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
 
 
 def print_obstacles(label, obstacles):
@@ -123,6 +167,10 @@ def main():
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(candidate_points.astype(np.float64))
         o3d.io.write_point_cloud(os.path.join(out_dir, "candidate_points.ply"), pcd)
+
+    png_path = os.path.join(out_dir, "obstacle_topview_debug.png")
+    save_topview_debug_png(png_path, candidate_points, obstacles)
+    print(f"top-view PNG 저장: {png_path}")
 
     with open(os.path.join(out_dir, "obstacles.json"), "w", encoding="utf-8") as f:
         json.dump(
