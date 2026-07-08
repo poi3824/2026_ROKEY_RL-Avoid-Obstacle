@@ -136,6 +136,17 @@ class MotionNode(Node):
         # 순차로만(결과 받고 다음) 보내므로 동시 모션 위험은 없다.
         self.cbg = ReentrantCallbackGroup()
 
+        # 세 액션 서버(MoveTo/Pick/Place)가 물리적으로 로봇 하나를 공유한다.
+        # ReentrantCallbackGroup은 goal/result/cancel "서비스"가 execute_callback
+        # 실행 중에도 응답할 수 있게 해줄 뿐이다 — execute_callback 자체는
+        # executor.create_task()로 콜백그룹과 무관하게 스케줄되므로, 콜백그룹
+        # 설정만으로는 두 goal의 execute_callback이 동시에 도는 걸 막지 못한다
+        # (brain이 항상 순차로만 보내서 지금까진 안 터졌을 뿐). 그래서 goal
+        # 수락 여부를 결정하는 goal_callback에서 직접 "이미 실행 중이면 거부"를
+        # 강제한다.
+        self._goal_lock = threading.Lock()
+        self._goal_active = False
+
         self.get_position_client = self.create_client(
             SrvDepthPosition, "/get_3d_position", callback_group=self.cbg
         )
@@ -162,14 +173,17 @@ class MotionNode(Node):
         self._moveto_srv = ActionServer(
             self, MoveTo, "motion/move_to", self._execute_move_to,
             callback_group=self.cbg, cancel_callback=self._on_cancel,
+            goal_callback=self._on_goal,
         )
         self._pick_srv = ActionServer(
             self, Pick, "motion/pick", self._execute_pick,
             callback_group=self.cbg, cancel_callback=self._on_cancel,
+            goal_callback=self._on_goal,
         )
         self._place_srv = ActionServer(
             self, Place, "motion/place", self._execute_place,
             callback_group=self.cbg, cancel_callback=self._on_cancel,
+            goal_callback=self._on_goal,
         )
 
         self.get_logger().info("motion_node 준비 완료 (MoveTo / Pick / Place)")
@@ -189,8 +203,50 @@ class MotionNode(Node):
         estop_event.set()
         return CancelResponse.ACCEPT
 
+    def _on_goal(self, goal_request):
+        """MoveTo/Pick/Place 3개가 공유하는 goal 수락 게이트.
+
+        로봇/그리퍼는 물리적으로 하나뿐이라 두 goal의 execute_callback이 동시에
+        도는 걸 절대 허용하면 안 된다(그리퍼는 Modbus TCP 소켓 하나를 공유하는데,
+        요청-응답에 순서 검증이 없어 두 스레드가 동시에 쓰면 응답이 뒤바뀌어도
+        코드가 알아챌 방법이 없다). 이미 실행 중인 goal이 있으면 무조건 거부한다.
+        """
+        with self._goal_lock:
+            if self._goal_active:
+                self.get_logger().warn("이미 실행 중인 goal이 있어 새 goal을 거부함")
+                return GoalResponse.REJECT
+            self._goal_active = True
+            return GoalResponse.ACCEPT
+
+    def _release_goal_slot(self):
+        with self._goal_lock:
+            self._goal_active = False
+
+    def _safe_terminate(self, goal_handle):
+        """未처리 예외로 execute 콜백이 죽을 때 goal을 안전하게 종료 상태로 옮긴다.
+
+        succeed()/abort()/canceled()는 goal이 이미 다른 상태(예: 취소 처리 중)면
+        rclpy가 잘못된 상태 전이로 보고 예외를 또 던진다. 여기서 그 예외까지
+        잡아야 브레인의 get_result_async()가 영원히 기다리는 걸 막을 수 있다.
+        """
+        try:
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+            elif goal_handle.is_active:
+                goal_handle.abort()
+        except Exception as e:
+            self.get_logger().error(f"goal 상태 정리 중 추가 오류(무시): {e}")
+
     # ---- Action 실행 콜백 ----
+    # 각 _execute_*는 _goal_active를 반드시 해제해야 하므로(안 그러면 로봇이
+    # 영구적으로 새 goal을 못 받음) 실제 로직은 _do_*로 옮기고 try/finally로 감싼다.
     def _execute_move_to(self, goal_handle):
+        try:
+            return self._do_move_to(goal_handle)
+        finally:
+            self._release_goal_slot()
+
+    def _do_move_to(self, goal_handle):
         pose = list(goal_handle.request.pose)
         label = goal_handle.request.label
         self.get_logger().info(f"[MoveTo] {label or ''} -> {pose}")
@@ -208,6 +264,12 @@ class MotionNode(Node):
             result.success = False
             result.message = "emergency stop"
             return result
+        except Exception as e:
+            self.get_logger().error(f"[MoveTo] 처리 중 예외 발생, goal 중단: {e}")
+            self._safe_terminate(goal_handle)
+            result.success = False
+            result.message = f"internal error: {e}"
+            return result
 
         goal_handle.succeed()
         result.success = True
@@ -215,6 +277,12 @@ class MotionNode(Node):
         return result
 
     def _execute_pick(self, goal_handle):
+        try:
+            return self._do_pick(goal_handle)
+        finally:
+            self._release_goal_slot()
+
+    def _do_pick(self, goal_handle):
         obj = goal_handle.request.object_label
         scan_pose = list(goal_handle.request.scan_pose)
         self.get_logger().info(f"[Pick] object={obj} scan_pose={scan_pose}")
@@ -222,9 +290,13 @@ class MotionNode(Node):
         result = Pick.Result()
         fb = Pick.Feedback()
 
-        try:
-            fb.phase = "scanning"; fb.attempt = 0
+        def send_feedback(phase, attempt=0):
+            fb.phase = phase
+            fb.attempt = attempt
             goal_handle.publish_feedback(fb)
+
+        try:
+            send_feedback("scanning", 0)
             self.motion.move_to_scan(scan_pose)
 
             source_pos = self.get_target_pos(obj)
@@ -235,15 +307,21 @@ class MotionNode(Node):
                 result.message = f"detect 실패: {obj}"
                 return result
 
-            fb.phase = "detected"
-            goal_handle.publish_feedback(fb)
+            send_feedback("detected", 0)
 
-            success = self.motion.pick(source_pos, obj)
+            success = self.motion.pick(source_pos, obj, feedback_cb=send_feedback)
         except EmergencyStop:
             goal_handle.abort()
             result.success = False
             result.picked_pose = []
             result.message = "emergency stop"
+            return result
+        except Exception as e:
+            self.get_logger().error(f"[Pick] 처리 중 예외 발생, goal 중단: {e}")
+            self._safe_terminate(goal_handle)
+            result.success = False
+            result.picked_pose = []
+            result.message = f"internal error: {e}"
             return result
 
         result.success = bool(success)
@@ -256,6 +334,12 @@ class MotionNode(Node):
         return result
 
     def _execute_place(self, goal_handle):
+        try:
+            return self._do_place(goal_handle)
+        finally:
+            self._release_goal_slot()
+
+    def _do_place(self, goal_handle):
         target_pose = list(goal_handle.request.target_pose)
         self.get_logger().info(f"[Place] target_pose={target_pose}")
 
@@ -263,13 +347,23 @@ class MotionNode(Node):
         fb.phase = "moving"
         goal_handle.publish_feedback(fb)
 
+        def send_feedback(phase):
+            fb.phase = phase
+            goal_handle.publish_feedback(fb)
+
         result = Place.Result()
         try:
-            self.motion.place(target_pose)
+            self.motion.place(target_pose, feedback_cb=send_feedback)
         except EmergencyStop:
             goal_handle.abort()
             result.success = False
             result.message = "emergency stop"
+            return result
+        except Exception as e:
+            self.get_logger().error(f"[Place] 처리 중 예외 발생, goal 중단: {e}")
+            self._safe_terminate(goal_handle)
+            result.success = False
+            result.message = f"internal error: {e}"
             return result
 
         goal_handle.succeed()

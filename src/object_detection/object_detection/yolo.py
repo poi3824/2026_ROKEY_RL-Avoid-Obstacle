@@ -68,11 +68,18 @@ class YoloModel:
             return False
         label_id = self.reversed_class_dict[target]
         results = self.model([frame], verbose=False)
+        detected = False
         for res in results:
             for score, label in zip(res.boxes.conf.tolist(), res.boxes.cls.tolist()):
-                if int(label) == label_id and score >= confidence_threshold:
-                    return True
-        return False
+                if int(label) != label_id:
+                    continue
+                # 2026-07-08: 파지 직후 hand_detected 오탐 진단용 임시 로그.
+                # pick()이 물체를 쥐고 hover로 복귀할 때 닫힌 그리퍼(+쥔 물체)를
+                # 모델이 hand로 오인식하는지 확인하려고 threshold 미만인 것도 찍는다.
+                print(f"[has_label] target='{target}' confidence={score:.3f} (threshold={confidence_threshold})")
+                if score >= confidence_threshold:
+                    detected = True
+        return detected
 
     def get_best_detection(self, img_node, target):
         """bbox/score에 더해, seg 모델이면 grasp용 짧은 변 각도(angle_deg)도 반환한다.

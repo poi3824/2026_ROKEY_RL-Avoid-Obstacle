@@ -35,6 +35,8 @@ PICK_MAX_ATTEMPTS = 3  # 최초 시도 + 재시도 2회
 # 손이 치워지면 같은 목적지로 movel을 다시 issue하는 것만으로 재개할 수 있다.
 HAND_PAUSE_STOP_MODE = 1
 
+MOTION_START_SETTLE_SEC = 0.15
+
 
 class EmergencyStop(Exception):
     """move_linear가 폴링 도중 응급 정지 요청을 감지하면 발생시킨다."""
@@ -89,16 +91,17 @@ class MotionExecutor:
         # 여기서는 self._movel/self._check_motion 호출만 감싼다 — self._stop
         # 호출을 dsr_lock 안에서 또 감싸면 non-reentrant lock이라 데드락난다.
         with self._dsr_lock:
-            self._movel(posx, self.velocity, self.acc)
+            self._movel(posx, self.velocity, self.acc)  # amovel 큐잉, 바로 리턴
 
         if self._check_motion is None:
             # check_motion이 주입되지 않은 경우(테스트 등) 기존처럼 mwait로 대기.
             self._mwait()
             return
 
+        time.sleep(MOTION_START_SETTLE_SEC)
         while True:
             with self._dsr_lock:
-                motion_state = self._check_motion()
+                motion_state = self._check_motion() # amovel 직후 0초 만에 바로 물어봄
             if motion_state == _DR_STATE_IDLE:
                 break
 
@@ -114,6 +117,9 @@ class MotionExecutor:
                     time.sleep(MOTION_POLL_INTERVAL)
                 with self._dsr_lock:
                     self._movel(posx, self.velocity, self.acc)  # 같은 목적지로 재개
+                # 재개도 amovel 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
+                time.sleep(MOTION_START_SETTLE_SEC)
+                continue
 
             time.sleep(MOTION_POLL_INTERVAL)
 
@@ -143,7 +149,7 @@ class MotionExecutor:
         self.move_linear(scan_pos)
         self.wait()
 
-    def pick(self, source_pos, obj_label=None):
+    def pick(self, source_pos, obj_label=None, feedback_cb=None):
         """source_pos 위 안전 hover 높이에서 depth를 확인하고 내려가 집는다.
 
         place와 동일한 패턴: 물체 바로 옆(source_pos)이 아니라 PICK_HOVER_HEIGHT만큼
@@ -164,6 +170,9 @@ class MotionExecutor:
             (빈 그리퍼로 옮기는 것을 막기 위함).
         """
         for attempt in range(PICK_MAX_ATTEMPTS):
+            if feedback_cb:
+                feedback_cb("descending", attempt + 1)
+
             hover_pos = source_pos[:2] + [source_pos[2] + PICK_HOVER_HEIGHT] + source_pos[3:]
             self.move_linear(hover_pos)
             self.wait()
@@ -175,6 +184,11 @@ class MotionExecutor:
                 down_pos = source_pos
 
             self.move_linear(down_pos)
+            
+            self.move_linear(source_pos)
+
+            if feedback_cb:
+                feedback_cb("gripping", attempt + 1)
             self.gripper.close_gripper()
             motion_done, grip_detected = self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
             width = self.gripper.get_width()
@@ -201,6 +215,9 @@ class MotionExecutor:
             if attempt == PICK_MAX_ATTEMPTS - 1:
                 return False
 
+            if feedback_cb:
+                feedback_cb("retry", attempt + 2)
+
             if self.redetect and obj_label:
                 redetected_pos = self.redetect(obj_label)
                 if redetected_pos is not None:
@@ -208,7 +225,7 @@ class MotionExecutor:
 
         return False
 
-    def place(self, target_pos):
+    def place(self, target_pos, feedback_cb=None):
         """target_pos 위로 이동한 뒤, 카메라 depth로 표면 위치를 확인해 내려놓고 그리퍼를 연다.
 
         get_surface_z 콜백이 없거나 depth를 못 읽으면(카메라 문제 등)
@@ -216,6 +233,9 @@ class MotionExecutor:
         """
         self.move_linear(target_pos)
         self.wait()
+
+        if feedback_cb:
+            feedback_cb("descending")
 
         surface_z = self.get_surface_z() if self.get_surface_z else None
         if surface_z is not None:
@@ -225,6 +245,9 @@ class MotionExecutor:
             print("[MotionExecutor] Depth를 못 읽어서 target_pos 그대로 내려감")
 
         self.move_linear(down_pos)
+
+        if feedback_cb:
+            feedback_cb("releasing")
         self.gripper.open_gripper()
         self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
         self.move_linear(target_pos)

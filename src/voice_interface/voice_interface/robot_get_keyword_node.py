@@ -52,8 +52,14 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 VOICE_ESTOP_TOPIC = "/voice/estop"
 
 # STT 텍스트에 이 단어가 있으면 LLM 왕복을 기다리지 않고 바로 응급정지를 호출한다.
+# STOP은 안전(즉시성)이 최우선이라 로컬 문자열 매칭으로 처리한다.
 STOP_KEYWORDS = ("정지", "멈춰", "스톱", "중지", "그만")
 
+# 2026-07-08: RESUME(재개)은 STOP과 반대로 즉시성보다 오탐 방지가 더 중요하다
+# (이 마이크 환경은 인식 품질이 낮아 로컬 문자열 매칭만으로 판단하면 잡음을 "다시
+# 시작해"로 오인해 의도치 않게 안전정지를 풀어버릴 위험이 있다). 그래서 RESUME은
+# STOP처럼 로컬에서 즉시 처리하지 않고, 반드시 LLM(extract_keyword)의 판단을 거쳐
+# brain_node로 전달한다 — brain이 실제로 /safety/reset을 호출할지 결정한다.
 ############ AI Processor ############
 # class AIProcessor:
 #     def __init__(self):
@@ -107,14 +113,23 @@ class GetKeyword(Node):
 - 사용자가 "멈춰", "정지", "스톱", "중지", "그만"이라고 말하면 즉시 안전 정지 명령으로 판단합니다.
 - 안전 정지 명령이면 객체, 출발지, 목적지는 모두 STOP으로 출력하고, 복귀 위치도 STOP으로 출력하세요.
 - 안전 정지 명령 출력은 반드시 아래 형식을 따르세요.
-- STOP은 완전 정지 명령입니다. 
+- STOP은 완전 정지 명령입니다.
 - 로봇의 작동을 완전히 정지시킵니다.
 - 다시 시작해 달라는 명령이 있을 때까지 로봇은 어떠한 동작도 수행하지 않습니다.
 
+<안전 규칙2>
+- 사용자가 "다시 시작해", "재개", "계속해", "다시 움직여", "동작해"처럼 정지 상태를
+  풀고 다시 동작하라는 취지로 말하면 재개 명령으로 판단합니다.
+- 재개 명령이면 객체, 출발지, 목적지, 복귀위치를 모두 RESUME으로 출력하세요.
+- 애매하거나 물체 이동 명령과 헷갈리면(예: 목적지가 불명확) RESUME으로 단정하지
+  말고 일반 물체 이동 명령 규칙을 우선 적용하세요. RESUME은 정지 해제 의도가
+  명확할 때만 출력합니다.
+
 <출력 형식>
 - 반드시 아래 형식으로만 출력하세요.
-객체 / 출발지 / 목적지 / 복귀위치    
+객체 / 출발지 / 목적지 / 복귀위치
 STOP / STOP / STOP / STOP
+RESUME / RESUME / RESUME / RESUME
 
 반드시 아래 형식으로만 출력하세요.
 
@@ -206,8 +221,26 @@ STOP / STOP / STOP / STOP
 출력:
 STOP / STOP / STOP / STOP
 
+입력:
+다시 시작해
+
+출력:
+RESUME / RESUME / RESUME / RESUME
+
+입력:
+재개해줘
+
+출력:
+RESUME / RESUME / RESUME / RESUME
+
+입력:
+계속해
+
+출력:
+RESUME / RESUME / RESUME / RESUME
+
 <사용자 입력>
-"{user_input}"     
+"{user_input}"
         """
 
         self.prompt_template = PromptTemplate(
@@ -258,7 +291,9 @@ STOP / STOP / STOP / STOP
 
         get_keyword() 호출 여부와 무관하게 항상 돈다. STOP류가 감지되면
         robot_action_node를 거치지 않고 여기서 바로 emergency_stop을 호출하고,
-        일반 명령은 self._latest_command에 저장해 get_keyword()가 꺼내가게 한다.
+        일반 명령(RESUME 포함)은 self._latest_command에 저장해 get_keyword()가
+        꺼내가게 한다 — RESUME은 STOP과 달리 여기서 즉시 처리하지 않고 반드시
+        LLM 분류 결과를 brain_node로 넘겨서 처리한다(오탐 방지).
         """
         try:
             print("open stream")
