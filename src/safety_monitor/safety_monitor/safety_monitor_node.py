@@ -39,7 +39,7 @@ HEARTBEAT_SEC = 0.5
 # 시간(초) 동안만 /hand_detected를 무시한다. hand 감지는 래치가 아니라 실시간
 # 값이라(_current_state 참고) 그냥 한 번 클리어하는 걸로는 안 되고, 시간 기반으로
 # 억제해야 한다. 너무 길게 잡으면 그 사이 진짜 손이 들어와도 못 걸러서 짧게 둔다.
-IGNORE_HAND_DURATION_SEC = 3.0
+IGNORE_HAND_DURATION_SEC = 1.0
 
 
 class SafetyMonitorNode(Node):
