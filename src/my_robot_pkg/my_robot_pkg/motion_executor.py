@@ -15,6 +15,7 @@
 # spin 기회를 자주 줘서 응급 정지 요청이 이동 도중에도 즉시 처리되게 한다.
 import contextlib
 import time
+import copy
 
 _DR_STATE_IDLE = 0  # DSR_ROBOT2.DR_STATE_IDLE과 동일 (check_motion()이 이 값이면 정지 상태)
 MOTION_POLL_INTERVAL = 0.05  # check_motion() 폴링 간격(초)
@@ -178,7 +179,10 @@ class MotionExecutor:
                 feedback_cb("descending", attempt + 1)
 
             hover_pos = source_pos[:2] + [source_pos[2] + PICK_HOVER_HEIGHT] + source_pos[3:]
-            moving_pos = source_pos[:2] + [PICK_RETRACT_Z] + source_pos[3:]
+            # moving_pos = source_pos[:2] + [source_pos[2] + PICK_RETRACT_Z + 100] + source_pos[3:]
+            temp = copy.deepcopy(hover_pos)
+            temp[2] = PICK_RETRACT_Z
+            moving_pos = temp
             self.move_linear(hover_pos)
             self.wait()
 
@@ -198,6 +202,7 @@ class MotionExecutor:
             width = self.gripper.get_width()
             width_ok = width is None or width >= self.grip_min_width
             success = bool(motion_done and grip_detected and width_ok)
+            print(f"motion_done:{motion_done}, grip_detected: {grip_detected}, width_ok: {width_ok}, success: {success}")
 
             if self.logger:
                 self.logger.log_attempt(
@@ -207,26 +212,28 @@ class MotionExecutor:
 
             if success:
                 self.move_linear(moving_pos)
+                time.sleep(0.15)
                 return True
+                
+            else: 
+                print(
+                    f"[MotionExecutor] pick 실패 (attempt {attempt + 1}/{PICK_MAX_ATTEMPTS}): "
+                    f"motion_done={motion_done} grip_detected={grip_detected} width={width}"
+                )
+                self.gripper.open_gripper()
+                self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
+                self.move_linear(hover_pos)
 
-            print(
-                f"[MotionExecutor] pick 실패 (attempt {attempt + 1}/{PICK_MAX_ATTEMPTS}): "
-                f"motion_done={motion_done} grip_detected={grip_detected} width={width}"
-            )
-            self.gripper.open_gripper()
-            self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
-            self.move_linear(hover_pos)
+                if attempt == PICK_MAX_ATTEMPTS - 1:
+                    return False
 
-            if attempt == PICK_MAX_ATTEMPTS - 1:
-                return False
+                if feedback_cb:
+                    feedback_cb("retry", attempt + 2)
 
-            if feedback_cb:
-                feedback_cb("retry", attempt + 2)
-
-            if self.redetect and obj_label:
-                redetected_pos = self.redetect(obj_label)
-                if redetected_pos is not None:
-                    source_pos = redetected_pos
+                if self.redetect and obj_label:
+                    redetected_pos = self.redetect(obj_label)
+                    if redetected_pos is not None:
+                        source_pos = redetected_pos
 
         return False
 
