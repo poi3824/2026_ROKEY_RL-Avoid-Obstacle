@@ -104,6 +104,14 @@ class GetKeyword(Node):
 - obj_B
 - obj_C
 
+<YOLO 클래스 매핑>
+- obj_B → class id 0
+- obj_C → class id 1
+- hand → class id 2
+- obstacle → class id 3
+- obj_A → class id 4
+- 사용자의 명령에는 class id 번호를 출력하지 않습니다. 항상 obj_A/obj_B/obj_C 이름으로만 출력하세요.
+
 <위치 리스트>
 - home
 - scan
@@ -140,6 +148,11 @@ class GetKeyword(Node):
   말고 일반 물체 이동 명령 규칙을 우선 적용하세요. RESUME은 정지 해제 의도가
   명확할 때만 출력합니다.
 
+<월드맵 규칙>
+- 사용자가 "월드맵 맵핑", "월드맵 매핑", "월드맵 스캔", "월드맵 업데이트"를 말하면 월드맵 작업 명령으로 판단합니다.
+- 안전 정지 명령이 포함된 경우에는 월드맵 명령보다 STOP을 우선합니다.
+- 월드맵 작업 명령이면 객체, 출발지, 목적지, 복귀 위치를 모두 WORLD_MAP으로 출력하세요.
+
 <출력 형식>
 - 반드시 아래 형식으로만 출력하세요.
 객체 / 출발지 / 목적지 / 복귀위치
@@ -161,6 +174,9 @@ obj_A / scan / target1 / home
 - 목적지가 명시되지 않은 경우 목적지는 UNKNOWN으로 출력합니다.
 - 작업 완료 후 복귀 위치는 항상 home입니다.
 - 설명이나 추가 문장은 절대 출력하지 않습니다.
+- "가져와", "갖다 놔", "이동해", "옮겨", "이동시켜"는 모두 이동 명령으로 간주합니다.
+- 출력은 반드시 한 줄만 작성합니다.
+- "출력:", "결과:", "설명:" 등의 문구를 절대 포함하지 않습니다.
 
 <객체 매핑>
 - "빨간색 통", "빨간거", "빨간색", "빨간 시약" → obj_A
@@ -169,7 +185,7 @@ obj_A / scan / target1 / home
 
 <위치 매핑>
 - "대기 위치", "대기 지점", "홈", "home" → home
-- "처음 위치", "집는 위치", "시작 위치", "스캔 위치", "출발 위치",→ scan
+- "처음 위치", "집는 위치", "시작 위치", "시작지점", "스캔 위치", "출발 위치", "0번", "0번 위치" → scan
 - "1번", "1번 위치", "타켓1" → target1
 - "2번", "2번 위치", "타켓2" → target2
 - "3번", "3번 위치", "타켓3" → target3
@@ -217,6 +233,30 @@ obj_A / target3 / scan / home
 
 출력:
 obj_A obj_B / scan scan / target1 target2 / home
+
+입력:
+빨간색 통을 이동시켜
+
+출력:
+obj_A / scan / UNKNOWN / home
+
+입력:
+월드맵 맵핑해
+
+출력:
+WORLD_MAP / WORLD_MAP / WORLD_MAP / WORLD_MAP
+
+입력:
+월드맵 스캔 시작
+
+출력:
+WORLD_MAP / WORLD_MAP / WORLD_MAP / WORLD_MAP
+
+입력:
+월드맵 업데이트 해줘
+
+출력:
+WORLD_MAP / WORLD_MAP / WORLD_MAP / WORLD_MAP
 
 입력:
 멈춰
