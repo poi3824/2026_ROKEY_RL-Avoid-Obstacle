@@ -163,7 +163,27 @@ class YoloModel:
                 if iou > best_iou:
                     best_iou = iou
                     best_center = self._mask_centroid(poly)
-        return self._circular_mean_deg_mod180(angles), best_center
+        return self._mode_angle_deg_mod180(angles), best_center
+
+    def _mode_angle_deg_mod180(self, angles_deg, bin_deg=1.0):
+        """8프레임 각도들의 최빈 구간(bin_deg도 단위 반올림)을 찾아 그 안의 값만
+        순환평균한다. 물체가 안 움직이는 짧은 순간(프레임 간 ~0.1초)에는 세그멘테이션
+        마스크가 거의 그대로라 여러 프레임이 같은 값으로 뭉치는 경우가 많은데,
+        가끔 한두 프레임만 튀는(모션 블러/부분 가림 등) 경우 최빈 구간만 쓰면
+        그 이상치를 자연스럽게 버릴 수 있다.
+
+        전부 유일값이라 최빈 구간에 표가 1개뿐이면(동률) 최빈값이 의미가 없으므로
+        전체 순환평균으로 폴백한다.
+        """
+        if not angles_deg:
+            return None
+        buckets = {}
+        for a in angles_deg:
+            buckets.setdefault(round(a / bin_deg), []).append(a)
+        best_bucket = max(buckets.values(), key=len)
+        if len(best_bucket) < 2:
+            return self._circular_mean_deg_mod180(angles_deg)
+        return self._circular_mean_deg_mod180(best_bucket)
 
     def _circular_mean_deg_mod180(self, angles_deg):
         """mod-180 각도들의 순환평균("double angle" 방식)을 낸다. 빈 리스트면 None."""
