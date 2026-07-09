@@ -207,26 +207,27 @@ class MotionExecutor:
 
             if success:
                 self.move_linear(moving_pos)
+                time.sleep(0.15)
                 return True
+            else:
+                print(
+                    f"[MotionExecutor] pick 실패 (attempt {attempt + 1}/{PICK_MAX_ATTEMPTS}): "
+                    f"motion_done={motion_done} grip_detected={grip_detected} width={width}"
+                )
+                self.gripper.open_gripper()
+                self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
+                self.move_linear(hover_pos)
 
-            print(
-                f"[MotionExecutor] pick 실패 (attempt {attempt + 1}/{PICK_MAX_ATTEMPTS}): "
-                f"motion_done={motion_done} grip_detected={grip_detected} width={width}"
-            )
-            self.gripper.open_gripper()
-            self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
-            self.move_linear(hover_pos)
+                if attempt == PICK_MAX_ATTEMPTS - 1:
+                    return False
 
-            if attempt == PICK_MAX_ATTEMPTS - 1:
-                return False
+                if feedback_cb:
+                    feedback_cb("retry", attempt + 2)
 
-            if feedback_cb:
-                feedback_cb("retry", attempt + 2)
-
-            if self.redetect and obj_label:
-                redetected_pos = self.redetect(obj_label)
-                if redetected_pos is not None:
-                    source_pos = redetected_pos
+                if self.redetect and obj_label:
+                    redetected_pos = self.redetect(obj_label)
+                    if redetected_pos is not None:
+                        source_pos = redetected_pos
 
         return False
 
