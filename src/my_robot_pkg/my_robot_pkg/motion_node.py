@@ -20,6 +20,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -56,10 +57,12 @@ TOOLCHARGER_PORT = "502"
 DEPTH_OFFSET = 5
 MIN_DEPTH = 40.0
 
-# get_3d_position 응답 대기 타임아웃. object_detection이 CPU seg 추론(프레임당 ~1초,
-# FUSION_FRAME_COUNT=3장)에 더해 단일 스레드 executor에서 hand 감지 타이머와 경합하므로
-# 5초로는 빠듯해 검출이 타임아웃으로 실패했다. 여유를 준다.
-GET_TARGET_TIMEOUT = 12.0
+# get_3d_position 응답 대기 타임아웃.
+# 2026-07-08: "seg 추론이 프레임당 ~1초"라는 가정으로 12초까지 늘렸었는데,
+# 실측해보니 프레임당 ~0.1초라 FUSION_FRAME_COUNT=8장을 배치 추론해도 1초
+# 안팎이다. hand 감지 타이머와의 경합, 카메라/네트워크 지연 여유를 감안해
+# 6초로 줄인다.
+GET_TARGET_TIMEOUT = 6.0
 GET_SURFACE_Z_SAMPLES = 5  # 팔이 settle 중이거나 depth가 순간적으로 튀는 프레임을 걸러내기 위한 샘플 수
 GET_SURFACE_Z_SAMPLE_INTERVAL = 0.1  # 샘플 사이 간격(초)
 
@@ -257,15 +260,21 @@ class MotionNode(Node):
 
         result = MoveTo.Result()
         try:
-            self.motion.move_linear(pose)
-            self.motion.wait()
+            if label == "home":
+                # home은 대기 상태라 그리퍼가 열려 있어야 한다. 이전 pick이
+                # 실패로 끝나거나 중간에 중단돼 그리퍼가 닫힌 채 남아있을 수
+                # 있어서, home으로 갈 때는 항상 그리퍼를 열어준다.
+                self.motion.go_home(pose)
+            else:
+                self.motion.move_linear(pose)
+                self.motion.wait()
         except EmergencyStop:
             goal_handle.abort()
             result.success = False
             result.message = "emergency stop"
             return result
         except Exception as e:
-            self.get_logger().error(f"[MoveTo] 처리 중 예외 발생, goal 중단: {e}")
+            self.get_logger().error(f"[MoveTo] 처리 중 예외 발생, goal 중단: {e}\n{traceback.format_exc()}")
             self._safe_terminate(goal_handle)
             result.success = False
             result.message = f"internal error: {e}"
@@ -317,7 +326,7 @@ class MotionNode(Node):
             result.message = "emergency stop"
             return result
         except Exception as e:
-            self.get_logger().error(f"[Pick] 처리 중 예외 발생, goal 중단: {e}")
+            self.get_logger().error(f"[Pick] 처리 중 예외 발생, goal 중단: {e}\n{traceback.format_exc()}")
             self._safe_terminate(goal_handle)
             result.success = False
             result.picked_pose = []
@@ -360,7 +369,7 @@ class MotionNode(Node):
             result.message = "emergency stop"
             return result
         except Exception as e:
-            self.get_logger().error(f"[Place] 처리 중 예외 발생, goal 중단: {e}")
+            self.get_logger().error(f"[Place] 처리 중 예외 발생, goal 중단: {e}\n{traceback.format_exc()}")
             self._safe_terminate(goal_handle)
             result.success = False
             result.message = f"internal error: {e}"

@@ -19,6 +19,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from std_srvs.srv import Trigger
+from std_msgs.msg import String
 
 from robot_interfaces.action import MoveTo, Pick, Place
 from robot_interfaces.msg import SafetyState
@@ -31,14 +32,16 @@ from robot_interfaces.msg import SafetyState
 # (오늘 겪은 "다음 동작으로 안 넘어감" 증상의 원인).
 #
 # motion_node.py 기준 최악 케이스 역산(Pick 기준):
-#   get_3d_position 왕복 GET_TARGET_TIMEOUT=12s
-#   get_surface_z()는 GET_SURFACE_Z_SAMPLES=5회 샘플 × 12s = 최대 60s
-#   PICK_MAX_ATTEMPTS=3회 시도, 매 시도 hover 이동 + get_surface_z(최대 60s)
-#     + 하강 + gripper(GRIPPER_TIMEOUT_SEC=3s) + 실패 시 redetect(최대 12s)
-#   => 3 * (60 + 3) + 2 * 12 ≈ 213s. 여유를 더해 240s로 잡는다.
+# 2026-07-08: "seg 추론 프레임당 ~1초" 가정이 실측(~0.1초)과 안 맞았던 걸 바로잡아
+# GET_TARGET_TIMEOUT을 12s->6s로 줄인 김에 이 값도 같이 재계산한다.
+#   get_3d_position 왕복 GET_TARGET_TIMEOUT=6s
+#   get_surface_z()는 GET_SURFACE_Z_SAMPLES=5회 샘플 × 6s = 최대 30s
+#   PICK_MAX_ATTEMPTS=3회 시도, 매 시도 hover 이동 + get_surface_z(최대 30s)
+#     + 하강 + gripper(GRIPPER_TIMEOUT_SEC=3s) + 실패 시 redetect(최대 6s)
+#   => 3 * (30 + 3) + 2 * 6 ≈ 111s. 여유를 더해 130s로 잡는다.
 # MoveTo/Place는 이보다 훨씬 짧게 끝나지만(get_surface_z 호출이 0~1회) 같은 상수를
-# 공용으로 써도 실패 감지가 최대 240s 늦어질 뿐 안전엔 문제없어 하나로 통일한다.
-ACTION_RESULT_TIMEOUT_SEC = 240.0
+# 공용으로 써도 실패 감지가 최대 130s 늦어질 뿐 안전엔 문제없어 하나로 통일한다.
+ACTION_RESULT_TIMEOUT_SEC = 130.0
 
 POSITION_COORDS = {
     "home": [417.61, -0.76, 477.45, 174.25, 179.99, -7.65],
@@ -68,6 +71,10 @@ class BrainNode(Node):
         # safety reset (ESTOP 래치 해제)
         self.safety_reset_client = self.create_client(Trigger, "/safety/reset")
 
+        # 2026-07-08: TTS. 상태 전환 시 get_keyword_node로 말할 텍스트를 던진다
+        # (get_keyword_node가 재생 + 웨이크워드 피드백 루프 차단까지 담당).
+        self.tts_pub = self.create_publisher(String, "/tts/speak", 10)
+
         # /safety/state 구독 (고수준 상태 추적)
         safety_qos = QoSProfile(depth=1)
         safety_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -94,6 +101,10 @@ class BrainNode(Node):
     # --- safety state 구독 콜백 ----
     def _on_safety_state(self, msg):
         self._safety_state = msg.state
+
+    def _say(self, text):
+        """로봇 음성 응답을 요청한다(fire-and-forget). get_keyword_node가 재생한다."""
+        self.tts_pub.publish(String(data=text))
 
     def robot_init(self):
         self.get_logger().info("Initializing robot: home 이동")
@@ -140,6 +151,7 @@ class BrainNode(Node):
         # 재시도하지는 않고, 다음 동작은 사용자가 새 명령으로 내리게 한다.
         if "RESUME" in objects:
             self.get_logger().warn("RESUME 명령 수신 — 안전 정지 해제")
+            self._say("다시 시작합니다")
             self._reset_safety()
             return
 
@@ -153,6 +165,7 @@ class BrainNode(Node):
 
         # 새 명령 시작 — 이전 ESTOP 래치가 있으면 해제한다.
         self._reset_safety()
+        self._say("명령을 확인했습니다")
 
         for obj, source, target in zip(objects, sources, targets):
             scan_pose = POSITION_COORDS.get(source)
@@ -174,8 +187,12 @@ class BrainNode(Node):
                     # RESUME 음성이 올 때까지 기다린다 (home 복귀도 시도 안 함 —
                     # 그것도 바로 emergency stop으로 실패하므로).
                     self.get_logger().warn("안전 정지 상태 감지 — 남은 물체 처리 중단, RESUME 대기")
+                    self._say("정지했습니다")
                     return
+                self._say("물체를 잡지 못해 건너뜁니다")
                 continue
+
+            self._say("잡았습니다")
 
             place_res = self._send_place(target_pose)
             if place_res is None or not place_res.success:
@@ -183,9 +200,13 @@ class BrainNode(Node):
                 self.get_logger().warn(f"'{obj}' Place 실패({reason})")
                 if self._safety_state != SafetyState.RUN:
                     self.get_logger().warn("안전 정지 상태 감지 — 남은 물체 처리 중단, RESUME 대기")
+                    self._say("정지했습니다")
                     return
+            else:
+                self._say("놓았습니다")
 
         self._send_move_to(POSITION_COORDS["home"], "home")
+        self._say("작업을 완료했습니다")
 
     # ---- Action / service 헬퍼 ----
     def _reset_safety(self):
