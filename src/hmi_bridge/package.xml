@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hmi_bridge</name>
+  <version>0.0.0</version>
+  <description>Flask 기반 HMI - ROS2 시스템(월드맵/장애물/작업 상태)을 관제만 하는 웹 UI. 로봇을 직접 제어하지 않는다.</description>
+  <maintainer email="poi3824@gmail.com">soo</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>rclpy</depend>
+  <depend>pointcloud_perception</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

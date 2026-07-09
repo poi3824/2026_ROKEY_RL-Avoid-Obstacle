@@ -29,7 +29,7 @@ import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -51,6 +51,7 @@ from pointcloud_perception.world_map_algo import (
     crop_roi,
     generate_scan_poses,
     is_flat_pose,
+    save_debug_visualizations,
     save_record,
     transform_stamped_to_matrix,
     voxel_downsample,
@@ -130,10 +131,17 @@ def build_world_map_update_msg(clusters, scan_dir, stamp):
     obstacles = []
     for c in clusters:
         obs = WorldMapObstacle()
-        obs.id = c["id"]
-        obs.centroid.x, obs.centroid.y, obs.centroid.z = c["centroid"]
-        obs.radius = c["radius"]
-        obs.num_points = c["num_points"]
+        obs.id = int(c["id"])
+        obs.centroid.x, obs.centroid.y, obs.centroid.z = (float(v) for v in c["centroid"])
+        obs.radius = float(c["radius"])
+        obs.height = float(c["height"])
+        obs.z_min = float(c["z_min"])
+        obs.z_max = float(c["z_max"])
+        obs.safety_radius = float(c["safety_radius"])
+        obs.safety_height = float(c["safety_height"])
+        obs.shape_type = c["shape_type"]
+        obs.num_points = int(c["num_points"])
+        obs.confidence = float(c["confidence"])
         obstacles.append(obs)
     msg.obstacles = obstacles
 
@@ -455,7 +463,17 @@ class WorldMapNode(Node):
         super().__init__("world_map_node")
 
         self.worker = ScanWorker()
-        self.obstacle_pub = self.create_publisher(WorldMapUpdate, "/world_map/obstacles", 10)
+
+        # 월드맵은 "상태"에 가깝다 - RL 노드가 스캔 끝난 뒤 늦게 구독을 시작해도
+        # 마지막 결과를 즉시 받도록 transient_local로 발행한다
+        # (safety_monitor_node의 /safety/state와 동일한 패턴).
+        world_map_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.obstacle_pub = self.create_publisher(WorldMapUpdate, "/world_map/obstacles", world_map_qos)
         self.update_srv = self.create_service(Trigger, "update_world_map", self.handle_update)
 
         self.get_logger().info("world_map_node ready. waiting for /update_world_map calls...")
@@ -480,7 +498,8 @@ class WorldMapNode(Node):
             return response
 
         try:
-            clusters = cluster_points(merged_points)
+            ground_z = ground_z_alignment.get("reference_ground_z")
+            clusters = cluster_points(merged_points, ground_z=ground_z)
         except Exception as e:
             self.get_logger().error(f"clustering failed: {e}")
             response.success = False
@@ -490,6 +509,16 @@ class WorldMapNode(Node):
         scan_dir = save_record(
             merged_points, clusters, poses, per_pose_points, ground_z_alignment, icp_mapping_report
         )
+
+        # top-view 디버그 PNG + Hough 교차검증 - 실패해도 장애물 결과 응답 자체는
+        # 살려야 하므로 별도로 try/except. 스캔(수 분) 대비 1~2초 추가되는 정도라
+        # 무시할 만하다 (world_map_algo.save_debug_visualizations 참고).
+        try:
+            debug_report = save_debug_visualizations(scan_dir, merged_points, ground_z, clusters)
+            for err in debug_report["errors"]:
+                self.get_logger().warn(f"debug visualization: {err}")
+        except Exception as e:
+            self.get_logger().warn(f"debug visualization failed: {e}")
 
         msg = build_world_map_update_msg(clusters, scan_dir, self.get_clock().now().to_msg())
         self.obstacle_pub.publish(msg)

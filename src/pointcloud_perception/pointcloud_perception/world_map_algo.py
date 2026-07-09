@@ -17,6 +17,20 @@ try:
 except Exception:
     OPEN3D_AVAILABLE = False
 
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except Exception:
+    CV2_AVAILABLE = False
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except Exception:
+    MATPLOTLIB_AVAILABLE = False
+
 
 # =========================
 # 스캔 설정 (cobot_scan/world_map_scan_capture_ranged.py 와 동일한 캘리브레이션)
@@ -62,6 +76,69 @@ ROI_Z_MAX_M = 0.60
 # DBSCAN 클러스터링 파라미터. 실제 스캔 밀도 보고 튜닝 필요.
 CLUSTER_EPS_M = 0.03
 CLUSTER_MIN_POINTS = 5
+
+# =========================
+# 장애물(cylinder) 추출 - World Map Update 결과를 RL에 넘길 좌표로 변환
+# =========================
+# merged_points에는 바닥/테이블 point가 그대로 섞여 있어서, DBSCAN을 바로 돌리면
+# 테이블에 맞닿은 장애물 base가 테이블 point와 이어져(density-reachable) 테이블+
+# 장애물 전체가 하나의 거대 클러스터로 뭉친다 (2026-07-08: 실제 저장된 스캔으로
+# 확인 - 30916 point짜리 radius 0.36m 클러스터 1개 + 파편 클러스터 여러 개).
+# RANSAC으로 평면을 새로 잡는 대신 compute_ground_quality()가 이미 여러 pose의
+# ground z histogram으로 추정해둔 reference_ground_z를 재사용한다 - 바닥 기준을
+# 두 군데서 따로 추정하면 서로 어긋날 수 있어서 피한다.
+MIN_OBSTACLE_HEIGHT_ABOVE_GROUND_M = 0.015
+
+# 바닥 제거만으로는 서로 떨어진 물체 두 개가 한 클러스터로 남을 수 있다
+# (2026-07-08: 실제 라이브 스캔에서 확인 - 밑단/윗단만 보면 완전히 분리된 원
+# 두 개인데, 중간 높이(z 6~15cm)에 실제 표면과 무관한 성긴 점들이 다리를 놓아서
+# DBSCAN이 하나로 이어붙임). RealSense가 depth discontinuity(물체 실루엣 경계)
+# 에서 만드는 flying pixel 노이즈가 원인으로 보인다 - 여러 pose에 걸쳐 조금씩
+# 나오지만, 실제 표면 점은 여러 pose가 같은 위치를 반복 관측해 국소 밀도가
+# 훨씬 높은 반면 flying pixel은 pose마다 위치가 달라 국소 밀도가 낮다. 그래서
+# statistical outlier removal로 이걸 걸러낸다 - std_ratio를 기존 ICP 전처리용
+# (2.0)보다 세게(1.0) 줘야 실제로 갈라짐을 확인함. 다만 이걸로도 등록 오차가
+# 큰(TF drift 심한) 스캔은 완전히 안 갈라질 수 있다 - 그 경우는 별개 문제(ICP
+# 매핑 품질)로 다뤄야 한다.
+OBSTACLE_OUTLIER_NB_NEIGHBORS = 20
+OBSTACLE_OUTLIER_STD_RATIO = 1.0
+
+# max 대신 percentile을 쓰는 이유: RealSense 노이즈로 한두 점만 튀어도 radius가
+# 실제보다 크게 잡히는 걸 방지하기 위함.
+CYLINDER_RADIUS_PERCENTILE = 95
+
+# DBSCAN 자체가 통과시킨 아주 작은 파편 클러스터(노이즈에 가까움)를 한 번 더
+# 걸러낸다. CLUSTER_MIN_POINTS(DBSCAN core point 기준, 5)와는 역할이 다르다.
+MIN_CLUSTER_POINTS_FOR_OBSTACLE = 80
+
+# 실측 전 placeholder (2026-07-08) - 그리퍼/툴 반지름을 포함한 안전 여유가
+# 확정되면 이 값을 실측치로 교체해야 한다.
+SAFETY_RADIUS_MARGIN_M = 0.04
+SAFETY_HEIGHT_MARGIN_M = 0.03
+
+# confidence = min(1.0, num_points / CONFIDENCE_NUM_POINTS_SCALE). 실제 스캔
+# 밀도 보고 튜닝 필요.
+CONFIDENCE_NUM_POINTS_SCALE = 1500.0
+
+# =========================
+# 디버그 시각화 / Hough 교차검증 (world_map_node.handle_update()가 스캔마다 자동 실행)
+# =========================
+# 스캔 자체가 로봇 이동 때문에 이미 수 분 걸리므로, PNG 저장 몇 장 추가되는 정도의
+# 비용(1~2초)은 무시할 만하다. 다만 시각화가 실패해도 실제 장애물 결과 응답에는
+# 영향이 없어야 하므로 호출부(world_map_node)에서 항상 try/except로 감싼다.
+ENABLE_TOPVIEW_DEBUG_PNG = True
+ENABLE_HOUGH_VALIDATION = True
+
+# Hough 검증은 cluster_points()가 이미 걸러낸 점이 아니라, 필터링 전 raw
+# point cloud를 그대로 이미지화한다 - 그래야 서로 다른 두 경로가 같은 답에
+# 도달하는지 보는 교차검증이 된다 (world_map_algo.cluster_points 참고).
+HOUGH_RESOLUTION_M = 0.005
+HOUGH_CLOSE_ITERATIONS = 2
+HOUGH_CANNY1 = 90.0
+HOUGH_PARAM2 = 18.0
+HOUGH_MIN_RADIUS_M = 0.02
+HOUGH_MAX_RADIUS_M = 0.09
+HOUGH_MATCH_MAX_DIST_M = 0.05
 
 # 나중에 DB/UI 연동을 생각해서 cobot_scan(다른 프로젝트의 범용 스캔 폴더)이
 # 아니라 이 워크스페이스 루트 하위 data/world_maps로 저장한다. src/ 밑이 아니라
@@ -815,36 +892,408 @@ def build_map_with_icp(per_pose_points, poses, ground_quality):
     return final_map, mapping_report
 
 
-def cluster_points(points_xyz, eps=CLUSTER_EPS_M, min_points=CLUSTER_MIN_POINTS):
-    """DBSCAN으로 point cloud를 군집화해서 장애물 목록을 만든다.
-
-    반환: [{"id", "centroid": [x,y,z], "radius", "num_points"}, ...]
-    """
-    if points_xyz.shape[0] == 0:
-        return []
-
+def dbscan_labels(points_xyz, eps, min_points):
+    """DBSCAN 라벨(noise=-1)만 반환. cluster_points()가 이 위에서 필터/파라미터 추정을 한다."""
     if not OPEN3D_AVAILABLE:
         raise RuntimeError("open3d가 없어서 클러스터링을 할 수 없습니다.")
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points_xyz)
-    labels = np.array(pcd.cluster_dbscan(eps=eps, min_points=min_points))
+    return np.array(pcd.cluster_dbscan(eps=eps, min_points=min_points))
+
+
+def remove_ground_band(points_xyz, ground_z, margin_m=MIN_OBSTACLE_HEIGHT_ABOVE_GROUND_M):
+    """ground_z + margin 이하 point를 바닥/테이블로 보고 제거한다.
+
+    ground_z가 없으면(품질 게이트 실패 등) 아무것도 제거하지 않고 그대로 반환한다 -
+    잘못된 기준으로 장애물 point까지 잘라내는 것보다 안전하다.
+    """
+    if points_xyz.shape[0] == 0 or ground_z is None:
+        return points_xyz
+    mask = points_xyz[:, 2] > (ground_z + margin_m)
+    return points_xyz[mask]
+
+
+def remove_flying_pixel_outliers(
+    points_xyz,
+    nb_neighbors=OBSTACLE_OUTLIER_NB_NEIGHBORS,
+    std_ratio=OBSTACLE_OUTLIER_STD_RATIO,
+):
+    """DBSCAN 전에 RealSense flying pixel(물체 경계 depth 불연속에서 생기는 노이즈)을
+    제거한다. 실제 표면 점은 여러 pose가 반복 관측해 국소 밀도가 높지만, flying
+    pixel은 pose마다 위치가 달라 국소 밀도가 낮다는 점을 이용한다.
+    """
+    if not OPEN3D_AVAILABLE or points_xyz.shape[0] == 0:
+        return points_xyz
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points_xyz)
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    return np.asarray(pcd.points)
+
+
+def fit_circle_2d(x, y):
+    """(x,y) 점들에 원을 대수적으로 피팅한다 (Kåsa method, 반복 없는 closed-form).
+
+    x^2+y^2 = 2*a*x + 2*b*y + c 형태로 세우면 (a,b,c)에 대해 선형이라 최소자승으로
+    바로 풀린다. center=(a,b), radius=sqrt(c + a^2+b^2).
+
+    반환: (cx, cy, radius) 또는 실패 시 None.
+    """
+    if x.shape[0] < 3:
+        return None
+
+    A = np.column_stack([x, y, np.ones_like(x)])
+    b = x ** 2 + y ** 2
+    try:
+        sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+
+    a_coef, b_coef, c_coef = sol
+    cx, cy = a_coef / 2.0, b_coef / 2.0
+    r_sq = c_coef + cx ** 2 + cy ** 2
+    if not np.isfinite(r_sq) or r_sq <= 0:
+        return None
+
+    return float(cx), float(cy), float(np.sqrt(r_sq))
+
+
+def compute_cluster_params(
+    member_points,
+    label,
+    ground_z=None,
+    safety_radius_margin=SAFETY_RADIUS_MARGIN_M,
+    safety_height_margin=SAFETY_HEIGHT_MARGIN_M,
+):
+    """클러스터 하나(원기둥 하나로 가정)를 RL/WorldMapObstacle에 넘길 파라미터로 변환한다.
+
+    center_x/center_y는 median이 아니라 원 피팅(fit_circle_2d)으로 구한다.
+    이 물체들은 위에서 보면 꽉 찬 원판이 아니라 속이 빈 링(컵 테두리 등)으로
+    잡히는데, 스캔이 링 둘레를 고르게 못 찍고 한쪽으로 치우쳐 찍으면 median
+    중심이 그쪽으로 쏠린다 (2026-07-08: 실제 스캔에서 각도별 반지름이 사인파
+    형태로 출렁이는 걸 확인 - 중심이 밀린 원의 전형적인 signature). 이 상태로
+    percentile-95를 반지름으로 쓰면 중심에서 가장 먼(반대쪽) 테두리까지 거리를
+    그대로 반지름으로 채택해버려 실제보다 크게 잡힌다. 원 피팅은 각도에 따른
+    반지름 편차(std)를 크게 줄여서 - 즉 더 진짜 원에 가깝게 - 중심을 잡는다.
+    원 피팅이 실패하면(점이 너무 적거나 퇴화된 경우) median으로 fallback한다.
+
+    height/center_z는 클러스터 자체 z_min이 아니라 ground_z(스캔 전체에서 이미
+    추정된 바닥 높이, compute_ground_quality 참고)를 기준으로 계산한다 - 이 스캔은
+    대부분 탑다운 시점이라 장애물 대부분이 상판 위주 point만 잡히고 실제 바닥까지
+    이어지는 point가 거의 없어서, 클러스터 자체 z_min을 쓰면 height가 심하게
+    과소추정된다. ground_z가 없으면 z_min을 그대로 fallback으로 쓴다.
+    """
+    x = member_points[:, 0]
+    y = member_points[:, 1]
+    z = member_points[:, 2]
+
+    fit = fit_circle_2d(x, y)
+    if fit is not None:
+        cx, cy, _fitted_radius = fit
+    else:
+        cx, cy = float(np.median(x)), float(np.median(y))
+
+    xy_dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+    radius = float(np.percentile(xy_dist, CYLINDER_RADIUS_PERCENTILE))
+
+    z_min = float(z.min())
+    z_max = float(z.max())
+
+    if ground_z is not None:
+        height = max(0.0, z_max - float(ground_z))
+        center_z = float(ground_z) + height / 2.0
+    else:
+        height = max(0.0, z_max - z_min)
+        center_z = (z_min + z_max) / 2.0
+
+    safety_radius = radius + safety_radius_margin
+    safety_height = height + safety_height_margin
+
+    confidence = min(1.0, member_points.shape[0] / CONFIDENCE_NUM_POINTS_SCALE)
+
+    return {
+        "id": int(label),
+        "centroid": [cx, cy, center_z],
+        "radius": radius,
+        "height": height,
+        "z_min": z_min,
+        "z_max": z_max,
+        "safety_radius": safety_radius,
+        "safety_height": safety_height,
+        "shape_type": "cylinder",
+        "num_points": int(member_points.shape[0]),
+        "confidence": float(confidence),
+    }
+
+
+def get_candidate_points(
+    points_xyz,
+    ground_z=None,
+    outlier_nb_neighbors=OBSTACLE_OUTLIER_NB_NEIGHBORS,
+    outlier_std_ratio=OBSTACLE_OUTLIER_STD_RATIO,
+):
+    """cluster_points()의 전처리(바닥 제거 -> flying pixel 제거)만 떼어낸 것.
+
+    save_debug_visualizations()의 top-view PNG가 cluster_points()와 정확히 같은
+    점 집합을 그리도록, 이 전처리를 cluster_points()와 공유한다.
+    """
+    candidate_points = remove_ground_band(points_xyz, ground_z)
+    candidate_points = remove_flying_pixel_outliers(
+        candidate_points, outlier_nb_neighbors, outlier_std_ratio
+    )
+    return candidate_points
+
+
+def cluster_points(
+    points_xyz,
+    ground_z=None,
+    eps=CLUSTER_EPS_M,
+    min_points=CLUSTER_MIN_POINTS,
+    min_cluster_points=MIN_CLUSTER_POINTS_FOR_OBSTACLE,
+    safety_radius_margin=SAFETY_RADIUS_MARGIN_M,
+    safety_height_margin=SAFETY_HEIGHT_MARGIN_M,
+    outlier_nb_neighbors=OBSTACLE_OUTLIER_NB_NEIGHBORS,
+    outlier_std_ratio=OBSTACLE_OUTLIER_STD_RATIO,
+):
+    """merged_points -> (바닥 제거 -> flying pixel 제거 -> DBSCAN -> 작은 파편 제거 ->
+    cylinder 파라미터 추정).
+
+    world_map_node가 /world_map/obstacles로 publish할 최종 장애물 목록을 만드는
+    진입점. ground_z를 안 주면 바닥 제거를 생략하고 z_min/z_max로만 height를 계산한다
+    (레거시 호출부 호환 - 다만 이 경우 테이블에 맞닿은 장애물이 테이블과 한 클러스터로
+    뭉칠 수 있다는 점을 알고 있어야 한다. handle_update()는 항상 ground_z를 넘긴다).
+
+    반환: [{"id", "centroid": [x,y,z], "radius", "height", "z_min", "z_max",
+    "safety_radius", "safety_height", "shape_type", "num_points", "confidence"}, ...]
+    """
+    if points_xyz.shape[0] == 0:
+        return []
+
+    candidate_points = get_candidate_points(points_xyz, ground_z, outlier_nb_neighbors, outlier_std_ratio)
+    if candidate_points.shape[0] == 0:
+        return []
+
+    labels = dbscan_labels(candidate_points, eps, min_points)
 
     clusters = []
     for label in sorted(set(labels.tolist())):
         if label < 0:
             continue  # noise
-        member_points = points_xyz[labels == label]
-        centroid = member_points.mean(axis=0)
-        radius = float(np.linalg.norm(member_points - centroid, axis=1).max())
-        clusters.append({
-            "id": int(label),
-            "centroid": centroid.tolist(),
-            "radius": radius,
-            "num_points": int(member_points.shape[0]),
-        })
+        member_points = candidate_points[labels == label]
+        if member_points.shape[0] < min_cluster_points:
+            continue
+        clusters.append(compute_cluster_params(
+            member_points, label, ground_z, safety_radius_margin, safety_height_margin
+        ))
 
     return clusters
+
+
+def save_topview_debug_png(out_path, candidate_points, obstacles):
+    """base_link 기준 top-view(XY) PNG - solid=radius, dashed=safety_radius.
+
+    candidate_points/obstacles 모두 base_link 좌표를 그대로 쓰므로
+    (world_map_node.transform_cloud_to_base 참고), 이 PNG의 x/y축은 카메라가
+    아니라 base_link 기준이다.
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        raise RuntimeError("matplotlib이 없어서 top-view PNG를 저장할 수 없습니다.")
+
+    fig, ax = plt.subplots(figsize=(8, 10))
+
+    if candidate_points.shape[0] > 0:
+        ax.scatter(candidate_points[:, 0], candidate_points[:, 1], s=1, c="#4C72B0", alpha=0.3)
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, obs in enumerate(sorted(obstacles, key=lambda o: o["id"])):
+        cx, cy, _ = obs["centroid"]
+        color = color_cycle[i % len(color_cycle)]
+
+        ax.plot(cx, cy, marker="x", color=color, markersize=10, mew=2)
+        ax.text(cx + 0.01, cy, f"id={obs['id']}", fontsize=10)
+        ax.add_patch(plt.Circle((cx, cy), obs["radius"], fill=False, linewidth=2, linestyle="-", color="black"))
+        ax.add_patch(
+            plt.Circle((cx, cy), obs["safety_radius"], fill=False, linewidth=1.5, linestyle="--", color="black")
+        )
+
+    ax.set_xlabel("x in base_link (m)")
+    ax.set_ylabel("y in base_link (m)")
+    ax.set_title("Obstacle extraction top-view debug\nsolid=radius, dashed=safety_radius")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def build_height_image(points_xyz, ground_z, resolution_m=HOUGH_RESOLUTION_M, close_iterations=HOUGH_CLOSE_ITERATIONS):
+    """point cloud -> top-down 높이(z) 이미지. 픽셀값 = 그 칸의 최대 z를
+    [ground_z, z_max] 범위로 0~255 정규화한 값. 점 사이 빈틈은 morphological
+    closing으로 메운다.
+
+    반환: (img_u8, closed, blurred, x_min, y_min) - x_min/y_min은 픽셀(0,0)의
+    world 좌표.
+    """
+    if not CV2_AVAILABLE:
+        raise RuntimeError("opencv(cv2)가 없어서 height image를 만들 수 없습니다.")
+
+    x_min, x_max = points_xyz[:, 0].min(), points_xyz[:, 0].max()
+    y_min, y_max = points_xyz[:, 1].min(), points_xyz[:, 1].max()
+    w = int(np.ceil((x_max - x_min) / resolution_m)) + 1
+    h = int(np.ceil((y_max - y_min) / resolution_m)) + 1
+
+    height_img = np.zeros((h, w), dtype=np.float32)
+    px = ((points_xyz[:, 0] - x_min) / resolution_m).astype(int)
+    py = ((points_xyz[:, 1] - y_min) / resolution_m).astype(int)
+    np.maximum.at(height_img, (py, px), points_xyz[:, 2])
+
+    z_lo = ground_z if ground_z is not None else float(points_xyz[:, 2].min())
+    z_hi = float(points_xyz[:, 2].max())
+    span = max(z_hi - z_lo, 1e-6)
+    img_u8 = np.clip((height_img - z_lo) / span * 255, 0, 255).astype(np.uint8)
+
+    kernel = np.ones((3, 3), np.uint8)
+    closed = cv2.morphologyEx(img_u8, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
+    blurred = cv2.GaussianBlur(closed, (5, 5), 0)
+
+    return img_u8, closed, blurred, x_min, y_min
+
+
+def detect_circles_hough(
+    blurred_img, resolution_m, x_min, y_min,
+    canny1=HOUGH_CANNY1, hough_param2=HOUGH_PARAM2,
+    min_radius_m=HOUGH_MIN_RADIUS_M, max_radius_m=HOUGH_MAX_RADIUS_M,
+):
+    """blurred height image에서 cv2.HoughCircles로 원을 검출해 world 좌표로 변환.
+
+    반환: [{"center": [x,y], "radius": r}, ...] (world 단위, m)
+    """
+    if not CV2_AVAILABLE:
+        raise RuntimeError("opencv(cv2)가 없어서 Hough 원 검출을 할 수 없습니다.")
+
+    min_r_px = max(1, int(round(min_radius_m / resolution_m)))
+    max_r_px = int(round(max_radius_m / resolution_m))
+
+    circles = cv2.HoughCircles(
+        blurred_img, cv2.HOUGH_GRADIENT, dp=1, minDist=min_r_px,
+        param1=canny1, param2=hough_param2,
+        minRadius=min_r_px, maxRadius=max_r_px,
+    )
+    if circles is None:
+        return []
+
+    results = []
+    for cx_px, cy_px, r_px in circles[0]:
+        wx = x_min + cx_px * resolution_m
+        wy = y_min + cy_px * resolution_m
+        wr = r_px * resolution_m
+        results.append({"center": [float(wx), float(wy)], "radius": float(wr)})
+    return results
+
+
+def match_hough_to_clusters(hough_circles, clusters, max_dist_m=HOUGH_MATCH_MAX_DIST_M):
+    """각 cluster_points() 결과에 대해 가장 가까운 hough 원을 찾아 매칭한다."""
+    matches = []
+    used = set()
+    for c in clusters:
+        ccx, ccy = c["centroid"][0], c["centroid"][1]
+        best_idx, best_dist = None, None
+        for i, h in enumerate(hough_circles):
+            if i in used:
+                continue
+            d = ((h["center"][0] - ccx) ** 2 + (h["center"][1] - ccy) ** 2) ** 0.5
+            if best_dist is None or d < best_dist:
+                best_idx, best_dist = i, d
+        if best_idx is not None and best_dist <= max_dist_m:
+            used.add(best_idx)
+            matches.append({"cluster": c, "hough": hough_circles[best_idx], "center_dist_m": best_dist})
+        else:
+            matches.append({"cluster": c, "hough": None, "center_dist_m": None})
+    unmatched_hough = [h for i, h in enumerate(hough_circles) if i not in used]
+    return matches, unmatched_hough
+
+
+def save_hough_overlay_png(out_path, blurred_img, resolution_m, x_min, y_min, clusters, hough_circles):
+    """circle-fit(파란 실선) vs hough(빨간 점선)를 height image 위에 겹쳐 그린다."""
+    if not MATPLOTLIB_AVAILABLE:
+        raise RuntimeError("matplotlib이 없어서 hough 오버레이 PNG를 저장할 수 없습니다.")
+
+    fig, ax = plt.subplots(figsize=(8, 10))
+    ax.imshow(blurred_img, cmap="gray", origin="lower",
+              extent=[x_min, x_min + blurred_img.shape[1] * resolution_m,
+                      y_min, y_min + blurred_img.shape[0] * resolution_m])
+
+    for c in clusters:
+        cx, cy = c["centroid"][0], c["centroid"][1]
+        ax.add_patch(plt.Circle((cx, cy), c["radius"], fill=False, color="cyan", linewidth=2))
+        ax.plot(cx, cy, marker="+", color="cyan", markersize=8)
+
+    for h in hough_circles:
+        cx, cy = h["center"]
+        ax.add_patch(plt.Circle((cx, cy), h["radius"], fill=False, color="red", linewidth=1.5, linestyle="--"))
+        ax.plot(cx, cy, marker="x", color="red", markersize=6)
+
+    handles = [
+        plt.Line2D([0], [0], color="cyan", lw=2, label="circle-fit (point-based)"),
+        plt.Line2D([0], [0], color="red", lw=1.5, linestyle="--", label="Hough (image-based)"),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=8)
+    ax.set_xlabel("x in base_link (m)")
+    ax.set_ylabel("y in base_link (m)")
+    ax.set_title("circle-fit vs Hough circle cross-validation")
+    ax.set_aspect("equal")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def save_debug_visualizations(scan_dir, merged_points, ground_z, clusters):
+    """스캔 1회당 top-view 디버그 PNG + Hough 교차검증을 scan_dir에 저장한다.
+
+    world_map_node.handle_update()가 매 스캔마다 호출한다. ENABLE_TOPVIEW_DEBUG_PNG/
+    ENABLE_HOUGH_VALIDATION로 개별 on/off 가능. 호출부에서 이미 try/except로
+    감싸지만, 여기서도 단계별로 실패를 report에 기록해 하나가 실패해도 나머지는
+    계속 진행한다.
+
+    반환: {"topview_png": path 또는 None, "hough_png": path 또는 None,
+    "hough_matches": [...] 또는 None, "errors": [...]}
+    """
+    report = {"topview_png": None, "hough_png": None, "hough_matches": None, "errors": []}
+
+    if ENABLE_TOPVIEW_DEBUG_PNG:
+        try:
+            candidate_points = get_candidate_points(merged_points, ground_z)
+            png_path = os.path.join(scan_dir, "obstacle_topview_debug.png")
+            save_topview_debug_png(png_path, candidate_points, clusters)
+            report["topview_png"] = png_path
+        except Exception as e:
+            report["errors"].append(f"topview_png failed: {e}")
+
+    if ENABLE_HOUGH_VALIDATION:
+        try:
+            _, _, blurred, x_min, y_min = build_height_image(merged_points, ground_z)
+            hough_circles = detect_circles_hough(blurred, HOUGH_RESOLUTION_M, x_min, y_min)
+            matches, unmatched = match_hough_to_clusters(hough_circles, clusters)
+
+            png_path = os.path.join(scan_dir, "circle_fit_vs_hough_overlay.png")
+            save_hough_overlay_png(png_path, blurred, HOUGH_RESOLUTION_M, x_min, y_min, clusters, hough_circles)
+
+            report["hough_png"] = png_path
+            report["hough_matches"] = [
+                {
+                    "cluster_id": m["cluster"]["id"],
+                    "circle_fit_center": m["cluster"]["centroid"][:2],
+                    "circle_fit_radius_m": m["cluster"]["radius"],
+                    "hough_center": m["hough"]["center"] if m["hough"] else None,
+                    "hough_radius_m": m["hough"]["radius"] if m["hough"] else None,
+                    "center_dist_m": m["center_dist_m"],
+                }
+                for m in matches
+            ]
+        except Exception as e:
+            report["errors"].append(f"hough_validation failed: {e}")
+
+    return report
 
 
 def save_pose_cloud(out_dir, pose_index, points):
