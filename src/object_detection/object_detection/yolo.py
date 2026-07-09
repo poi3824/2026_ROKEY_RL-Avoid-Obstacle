@@ -64,7 +64,7 @@ class YoloModel:
         print("%d frames captured", len(frames))
         return list(frames.values())
 
-    def has_label(self, frame, target, confidence_threshold=0.6):
+    def has_label(self, frame, target, confidence_threshold=0.75):
         """단일 프레임 1장만으로 target 라벨이 있는지 빠르게 확인한다 (True/False).
 
         2026-07-07: hand 안전 감지용. get_best_detection은 pick 신뢰도를 위해
@@ -250,9 +250,11 @@ class YoloModel:
 
     def _aggregate_detections(self, results, confidence_threshold=0.5, iou_threshold=0.5):
         """
-        Fuse raw detection boxes across frames using IoU-based grouping
-        and majority voting for robust final detections.
+      IoU 기반 그룹화를 사용하여 프레임 전체에 원시 감지 상자를 융합합니다.
+        강력한 최종 탐지를 위한 다수결 투표.
         """
+
+
         raw = []
         for res in results:
             for box, score, label in zip(
