@@ -4,6 +4,9 @@ import os
 import threading
 import time
 
+import threading
+import time
+
 import rclpy
 import pyaudio
 from rclpy.node import Node
@@ -236,6 +239,7 @@ STOP / STOP / STOP / STOP
 RESUME / RESUME / RESUME / RESUME
 
 <사용자 입력>
+"{user_input}"
 "{user_input}"
         """
 
@@ -530,6 +534,7 @@ RESUME / RESUME / RESUME / RESUME
         self._command_ready.clear()
 
         response.success = True
+        response.message = keyword_str
         response.message = keyword_str
         return response
 

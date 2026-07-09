@@ -14,6 +14,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'resource'),
             [f for f in glob('resource/*') if os.path.isfile(f)]),
+        (os.path.join('share', package_name, 'launch'),
+            glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -28,8 +30,10 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        
+            'brain_node = my_robot_pkg.brain_node:main',
+            'motion_node = my_robot_pkg.motion_node:main',
             'robot_action_node = my_robot_pkg.robot_action_node:main',
+            'gripper_width_probe = my_robot_pkg.gripper_width_probe:main',
         ],
     },
 )

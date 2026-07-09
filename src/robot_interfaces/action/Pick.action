@@ -1,0 +1,14 @@
+# brain_node → motion_node: scan_pose에서 물체를 카메라로 detect한 뒤 집는다.
+# detect(get_3d_position) + 좌표변환 + 하강/파지/재시도는 motion_node 내부에서 처리.
+# ---- goal ----
+string object_label   # obj_A / obj_B / obj_C
+float64[] scan_pose   # 관측 위치 [x, y, z, rx, ry, rz]
+---
+# ---- result ----
+bool success          # 파지 확인됨(grip_detected + 너비)
+float64[] picked_pose # 실제로 집은 베이스 좌표 (로그/디버그, 실패 시 빈 배열)
+string message
+---
+# ---- feedback ----
+string phase          # scanning / detected / descending / gripping / retry
+uint8 attempt         # 현재 시도 회차 (1..PICK_MAX_ATTEMPTS)

@@ -1,0 +1,10 @@
+# brain_node → motion_node: target_pose로 이동해 카메라 depth로 표면 위에 내려놓는다.
+# ---- goal ----
+float64[] target_pose # [x, y, z, rx, ry, rz]
+---
+# ---- result ----
+bool success
+string message
+---
+# ---- feedback ----
+string phase          # moving / descending / releasing / done

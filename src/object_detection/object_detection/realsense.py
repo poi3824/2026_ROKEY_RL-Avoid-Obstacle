@@ -1,3 +1,5 @@
+import threading
+
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
@@ -7,6 +9,12 @@ class ImgNode(Node):
     def __init__(self):
         super().__init__('img_node')
         self.bridge = CvBridge()
+        # 2026-07-08: object_detection_node가 MultiThreadedExecutor로 바뀌면서
+        # hand 감지 타이머와 get_3d_position 서비스가 서로 다른 스레드에서
+        # 동시에 이 노드를 spin_once() 할 수 있게 됐다. rclpy 노드는 여러
+        # 스레드에서 동시에 spin_once되는 걸 상정하지 않으므로, 이 노드를
+        # spin_once할 땐 항상 이 락을 잡고 하도록 호출부(detection.py, yolo.py)에서 사용한다.
+        self.spin_lock = threading.Lock()
         self.color_frame = None
         self.color_frame_stamp = None
         self.depth_frame = None
