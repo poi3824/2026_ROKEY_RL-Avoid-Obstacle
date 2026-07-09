@@ -211,8 +211,15 @@ class MotionExecutor:
             
 
             if success:
+                # 2026-07-08: 여기 self.wait()가 빠진 채 time.sleep(0.15)만 있으면,
+                # move_linear(moving_pos)의 check_motion() 폴링이 아직 컨트롤러에 새
+                # 명령이 등록되기 전 상태(방금 끝난 이전 명령의 stale idle)를 읽고
+                # 너무 일찍 리턴할 수 있다. 그 직후 place()가 바로 target_pos로
+                # move_linear를 또 큐잉하면 컨트롤러가 두 명령을 블렌딩해서 Z축으로
+                # 물러나는 구간 없이 곧장 target_pos로 가버리는 문제가 있었다.
+                # hover_pos 이동(위쪽)과 동일하게 mwait()로 한 번 더 확인해서 막는다.
                 self.move_linear(moving_pos)
-                time.sleep(0.15)
+                self.wait()
                 return True
                 
             else: 
