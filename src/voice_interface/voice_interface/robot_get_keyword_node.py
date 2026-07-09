@@ -292,6 +292,14 @@ RESUME / RESUME / RESUME / RESUME
 
         # 2026-07-08: TTS. brain_node가 /tts/speak로 던진 텍스트를 재생한다.
         # _speaking은 재생 중임을 알려 웨이크워드 리스너를 잠시 멈추는 플래그.
+        #
+        # 2026-07-08 (버그 수정): STT(sd.rec)와 TTS(sd.play)는 둘 다 sounddevice의
+        # 전역 편의 함수를 쓰는데, 이 함수들은 스레드 세이프하지 않다(내부적으로
+        # 전역 스트림 상태를 공유). _listen_loop(백그라운드 스레드)가 STT 녹음
+        # 중일 때 ROS spin 스레드에서 _on_speak(TTS)가 동시에 불리면 두 스레드가
+        # 동시에 sounddevice 스트림을 건드리게 되어 세그폴트가 났다(실측: get_keyword_node
+        # 프로세스 자체가 죽음). 이 락으로 STT 녹음과 TTS 재생을 서로 배타적으로 만든다.
+        self._audio_lock = threading.Lock()
         self.tts = TTS(openai_api_key, voice=TTS_VOICE)
         self._speaking = threading.Event()
         self.create_subscription(String, TTS_TOPIC, self._on_speak, 10)
@@ -350,7 +358,8 @@ RESUME / RESUME / RESUME / RESUME
             session_start = time.time()
             while rclpy.ok() and (time.time() - session_start) < MAX_SESSION_SEC:
                 # STT --> Keyword Extract --> Embedding
-                output_message = self.stt.speech2text()
+                with self._audio_lock:
+                    output_message = self.stt.speech2text()
                 self._flush_mic_stream()
                 self.get_logger().info(f"STT 인식 결과: '{output_message}'")
 
@@ -446,7 +455,8 @@ RESUME / RESUME / RESUME / RESUME
             return
         self._speaking.set()
         try:
-            self.tts.speak(text)
+            with self._audio_lock:
+                self.tts.speak(text)
         except Exception as e:
             self.get_logger().error(f"TTS 재생 실패(무시): {e}")
         finally:
