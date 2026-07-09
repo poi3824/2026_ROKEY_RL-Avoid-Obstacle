@@ -154,11 +154,18 @@ class GetKeyword(Node):
 - 안전 정지 명령이 포함된 경우에는 월드맵 명령보다 STOP을 우선합니다.
 - 월드맵 작업 명령이면 객체, 출발지, 목적지, 복귀 위치를 모두 WORLD_MAP으로 출력하세요.
 
+<손 감지 무시 규칙>
+- 사용자가 "손 아니야", "손 아님", "그거 손 아니야", "손 감지 무시해", "손 아니라고"처럼
+  손 감지 오탐을 정정하는 취지로 말하면 손 감지 무시 명령으로 판단합니다.
+- 안전 정지 명령이 포함된 경우에는 이 명령보다 STOP을 우선합니다.
+- 손 감지 무시 명령이면 객체, 출발지, 목적지, 복귀 위치를 모두 IGNORE_HAND로 출력하세요.
+
 <출력 형식>
 - 반드시 아래 형식으로만 출력하세요.
 객체 / 출발지 / 목적지 / 복귀위치
 STOP / STOP / STOP / STOP
 RESUME / RESUME / RESUME / RESUME
+IGNORE_HAND / IGNORE_HAND / IGNORE_HAND / IGNORE_HAND
 
 반드시 아래 형식으로만 출력하세요.
 
@@ -260,6 +267,18 @@ WORLD_MAP / WORLD_MAP / WORLD_MAP / WORLD_MAP
 WORLD_MAP / WORLD_MAP / WORLD_MAP / WORLD_MAP
 
 입력:
+손 아니야
+
+출력:
+IGNORE_HAND / IGNORE_HAND / IGNORE_HAND / IGNORE_HAND
+
+입력:
+손 감지 무시해
+
+출력:
+IGNORE_HAND / IGNORE_HAND / IGNORE_HAND / IGNORE_HAND
+
+입력:
 멈춰
 
 출력:
@@ -323,6 +342,22 @@ RESUME / RESUME / RESUME / RESUME
         # self.ai_processor = AIProcessor()
 
         self.estop_pub = self.create_publisher(Bool, VOICE_ESTOP_TOPIC, 10)
+
+        # 2026-07-09: RESUME("다시 시작해")도 STOP처럼 brain_node를 거치지 않고
+        # 여기서 바로 처리한다. ESTOP이 이제 액션을 중단시키지 않고 그 자리에서
+        # 대기만 하는 구조라(motion_executor._handle_interrupts), brain_node의
+        # 메인 루프는 그 액션의 결과를 기다리며 항상 블로킹돼 있다 — 그 상태에서는
+        # get_keyword()를 다시 호출할 기회가 없어서, RESUME을 brain_node로 넘기면
+        # 영원히 전달이 안 되고 로봇이 안 움직이는 문제가 있었다(실측). LLM 분류는
+        # extract_keyword()에서 이미 거치므로(오탐 방지는 그대로 유지), 여기서
+        # 결과만 보고 바로 /safety/reset을 호출한다.
+        self.safety_reset_client = self.create_client(Trigger, "/safety/reset")
+
+        # 2026-07-09: YOLO hand 감지 오탐(그리퍼+쥔 물체를 손으로 오인식) 임시
+        # 완화책. 모델을 다시 학습시키는 대신, "손 아니야"라고 말하면 짧은 시간
+        # 동안 hand 감지를 무시하도록 safety_monitor에 요청한다. RESUME과 같은
+        # 이유로 brain_node를 거치지 않고 여기서 바로 호출한다.
+        self.ignore_hand_client = self.create_client(Trigger, "/safety/ignore_hand")
 
         # 2026-07-06: 백그라운드 리스닝 스레드(_listen_loop)와 get_keyword() 서비스
         # 콜백이 공유하는 상태. _listen_loop가 파싱한 최신 명령을 여기 넣어두면
@@ -434,6 +469,22 @@ RESUME / RESUME / RESUME / RESUME
                     self._call_emergency_stop()
                     continue
 
+                if "RESUME" in obj:
+                    # 2026-07-09: brain_node로 안 넘기고 여기서 바로 처리 —
+                    # _call_safety_reset() 주석 참고(brain_node 메인 루프 블로킹 문제).
+                    self.get_logger().warn(f"재개 명령 감지(LLM): STT='{output_message}'")
+                    self._call_safety_reset()
+                    self._speak_locally("다시 시작합니다")
+                    break
+
+                if "IGNORE_HAND" in obj:
+                    # 2026-07-09: hand 감지 오탐(YOLO) 임시 완화 — RESUME과 같은
+                    # 이유로 brain_node를 거치지 않고 여기서 바로 처리한다.
+                    self.get_logger().warn(f"손 감지 무시 명령(LLM): STT='{output_message}'")
+                    self._call_ignore_hand()
+                    self._speak_locally("손 아닌 걸로 하겠습니다")
+                    break
+
                 # obj, source, target, return_pos는 각각 리스트이므로
                 # " ".join(keyword)처럼 튜플을 바로 join하면
                 # 각 원소가 str이 아닌 list라 TypeError가 발생한다.
@@ -491,16 +542,15 @@ RESUME / RESUME / RESUME / RESUME
         """
         self.estop_pub.publish(Bool(data=True))
 
-    def _on_speak(self, msg):
-        """brain_node가 /tts/speak로 던진 텍스트를 음성으로 재생한다.
+    def _speak_locally(self, text):
+        """텍스트를 음성으로 재생한다. _on_speak(브레인이 던진 텍스트)와
+        _call_safety_reset(RESUME 로컬 처리) 양쪽이 공유하는 헬퍼다.
 
         재생 동안 self._speaking을 세워 웨이크워드 리스너를 멈추고(자기 목소리
         오탐 방지), 끝나면 그 사이 마이크에 쌓인 오디오(로봇 목소리 포함)를
-        버린 뒤 리스너를 재개한다. 이 콜백은 spin 스레드에서 돌며 재생 시간만큼
-        블로킹하지만, 그동안 처리 못 하는 다른 콜백이 없어(get_keyword는 브레인이
-        말하는 시점엔 호출 중이 아님) 문제없다.
+        버린 뒤 리스너를 재개한다.
         """
-        text = msg.data.strip()
+        text = text.strip()
         if not text:
             return
         self._speaking.set()
@@ -512,6 +562,48 @@ RESUME / RESUME / RESUME / RESUME
         finally:
             self._flush_mic_stream()
             self._speaking.clear()
+
+    def _on_speak(self, msg):
+        """brain_node가 /tts/speak로 던진 텍스트를 음성으로 재생한다.
+
+        이 콜백은 spin 스레드에서 돌며 재생 시간만큼 블로킹하지만, 그동안
+        처리 못 하는 다른 콜백이 없어(get_keyword는 브레인이 말하는 시점엔
+        호출 중이 아님) 문제없다.
+        """
+        self._speak_locally(msg.data)
+
+    def _call_safety_reset(self):
+        """RESUME("다시 시작해")을 brain_node를 거치지 않고 여기서 바로 처리한다.
+
+        2026-07-09: safety_reset_client 옆 주석 참고 — ESTOP이 액션을 중단시키지
+        않고 그 자리에서 대기만 하는 구조가 되면서, brain_node의 메인 루프가 그
+        액션 결과를 기다리며 항상 블로킹돼 있어 RESUME을 brain_node로 넘기면
+        전달이 안 됐다(실측: "다시 시작해"를 해도 하강이 재개되지 않음). 여기서
+        직접 /safety/reset을 호출해 ESTOP 래치를 해제하면, motion_executor의
+        _handle_interrupts가 즉시 감지하고 하던 동작을 재개한다.
+        """
+        if not self.safety_reset_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error("/safety/reset 서비스 없음 — RESUME 처리 실패")
+            return
+        future = self.safety_reset_client.call_async(Trigger.Request())
+        start = time.time()
+        while not future.done() and time.time() - start < 2.0:
+            time.sleep(0.01)
+
+    def _call_ignore_hand(self):
+        """"손 아니야"를 brain_node를 거치지 않고 여기서 바로 처리한다.
+
+        hand 감지는 래치가 아니라 /hand_detected를 실시간으로 반영하므로
+        (safety_monitor._current_state), RESUME처럼 한 번 리셋하는 방식이 아니라
+        일정 시간 동안 무시하도록 safety_monitor에 요청한다.
+        """
+        if not self.ignore_hand_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error("/safety/ignore_hand 서비스 없음 — 처리 실패")
+            return
+        future = self.ignore_hand_client.call_async(Trigger.Request())
+        start = time.time()
+        while not future.done() and time.time() - start < 2.0:
+            time.sleep(0.01)
 
     def extract_keyword(self, output_message):
         response = self.lang_chain.invoke({"user_input": output_message})

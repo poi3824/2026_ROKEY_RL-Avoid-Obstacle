@@ -171,14 +171,15 @@ class BrainNode(Node):
             self._update_world_map()
             return
 
-        # RESUME은 STOP과 달리 get_keyword_node가 로컬에서 즉시 처리하지 않고
-        # LLM 분류를 거쳐 여기로 온다(마이크 인식 오탐 방지). 여기서는 안전 래치만
-        # 풀어준다 — 멈춰있던 동안 상황이 바뀌었을 수 있으니 하던 작업을 자동으로
-        # 재시도하지는 않고, 다음 동작은 사용자가 새 명령으로 내리게 한다.
+        # 2026-07-09: RESUME은 이제 get_keyword_node가 브레인을 거치지 않고
+        # 여기서 바로 처리한다(_call_safety_reset 참고) — ESTOP이 액션을
+        # 중단시키지 않고 그 자리에서 대기만 하는 구조가 되면서, 브레인의
+        # 메인 루프가 진행 중인 액션 결과를 기다리며 블로킹돼 있어 RESUME이
+        # 여기로 절대 전달될 수 없기 때문이다(실측: "다시 시작해"를 해도
+        # 하강이 재개 안 됨). STOP과 마찬가지로 여기 올 일은 거의 없지만,
+        # 방어적으로만 남겨둔다.
         if "RESUME" in objects:
-            self.get_logger().warn("RESUME 명령 수신 — 안전 정지 해제")
-            self._say("다시 시작합니다")
-            self._reset_safety()
+            self.get_logger().warn("RESUME 명령 수신(무시) — get_keyword_node가 이미 처리함")
             return
 
         # 리스트의 크기 맞으면 작동, 맞지 않으면 크기가 작은 리스트는 무시함으로

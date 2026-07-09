@@ -9,6 +9,8 @@
 # motion은 move_linear 폴링 루프의 실시간 정지·재개에 이 상태를 쓴다.
 # 하드 정지(ESTOP)는 두뇌 상태와 무관하게 로봇 컨트롤러의 motion/move_stop을
 # 직접 호출하므로, 두뇌가 바쁘거나 멈춰 있어도 로봇을 세울 수 있다.
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
@@ -32,6 +34,13 @@ ESTOP_STOP_MODE = 3
 # 대비한다. 상태가 바뀌는 순간에는 이 타이머와 별개로 즉시 발행한다.
 HEARTBEAT_SEC = 0.5
 
+# 2026-07-09: YOLO hand 감지 오탐(그리퍼+쥔 물체를 손으로 오인식하는 문제)에 대한
+# 임시 완화책 — 모델을 다시 학습시키는 대신, 음성으로 "손 아니야"라고 하면 이
+# 시간(초) 동안만 /hand_detected를 무시한다. hand 감지는 래치가 아니라 실시간
+# 값이라(_current_state 참고) 그냥 한 번 클리어하는 걸로는 안 되고, 시간 기반으로
+# 억제해야 한다. 너무 길게 잡으면 그 사이 진짜 손이 들어와도 못 걸러서 짧게 둔다.
+IGNORE_HAND_DURATION_SEC = 1.0
+
 
 class SafetyMonitorNode(Node):
     def __init__(self):
@@ -43,6 +52,7 @@ class SafetyMonitorNode(Node):
 
         self._hand_detected = False
         self._estop_latched = False  # ESTOP은 래치된다 — /safety/reset 전까지 유지
+        self._hand_ignore_until = 0.0  # 이 시각(monotonic) 전까지는 hand 감지를 무시
         self._last_state = None
 
         # 상태는 마지막 값이 중요하므로 transient_local로 발행 → 나중에 뜬
@@ -58,6 +68,7 @@ class SafetyMonitorNode(Node):
         # 버튼/외부 트리거용 서비스도 열어둔다.
         self.create_service(Trigger, "/safety/estop", self._on_estop_request)
         self.create_service(Trigger, "/safety/reset", self._on_reset_request)
+        self.create_service(Trigger, "/safety/ignore_hand", self._on_ignore_hand_request)
 
         self.move_stop_client = self.create_client(MoveStop, move_stop_service)
 
@@ -94,6 +105,14 @@ class SafetyMonitorNode(Node):
         response.message = "safety reset"
         return response
 
+    def _on_ignore_hand_request(self, request, response):
+        self._hand_ignore_until = time.monotonic() + IGNORE_HAND_DURATION_SEC
+        self.get_logger().warn(f"손 감지 {IGNORE_HAND_DURATION_SEC}초간 무시(음성 정정)")
+        self._publish_state()
+        response.success = True
+        response.message = "hand detection ignored temporarily"
+        return response
+
     # ---- 정지 실행 ----
     def _trigger_estop(self, reason):
         if not self._estop_latched:
@@ -117,7 +136,7 @@ class SafetyMonitorNode(Node):
     def _current_state(self):
         if self._estop_latched:
             return SafetyState.ESTOP, "estop latched"
-        if self._hand_detected:
+        if self._hand_detected and time.monotonic() >= self._hand_ignore_until:
             return SafetyState.PAUSE, "hand detected"
         return SafetyState.RUN, "normal"
 
