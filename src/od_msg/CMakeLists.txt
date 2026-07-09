@@ -8,6 +8,7 @@ find_package(rosidl_default_generators REQUIRED)
 # 서비스 인터페이스 생성
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SrvDepthPosition.srv"
+  "srv/SrvVisibilityCheck.srv"
 )
 
 # 런타임 의존성 내보내기

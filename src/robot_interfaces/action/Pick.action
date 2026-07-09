@@ -3,6 +3,10 @@
 # ---- goal ----
 string object_label   # obj_A / obj_B / obj_C
 float64[] scan_pose   # 관측 위치 [x, y, z, rx, ry, rz]
+# 2026-07-09: 비어있으면 기존처럼 scan_pose 한 지점만 본다(하위 호환). 채워져
+# 있으면 scan_pose -> scan_pose_b로 스윕하면서 물체가 완전히 보일 때까지
+# 탐색하다가 보이는 즉시 멈춘다(motion_executor.sweep_to_detect).
+float64[] scan_pose_b
 ---
 # ---- result ----
 bool success          # 파지 확인됨(grip_detected + 너비)

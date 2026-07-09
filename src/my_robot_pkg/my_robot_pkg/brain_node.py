@@ -45,7 +45,9 @@ ACTION_RESULT_TIMEOUT_SEC = 130.0
 
 POSITION_COORDS = {
     "home": [417.61, -0.76, 477.45, 174.25, 179.99, -7.65],
-    "scan": [603.65, 117.06, 466.15, 96.74, -179.75, -85.08],
+    "scan": [560.37, 256.18, 460.56, 44.09, 175.79, -130.28],
+    # 2026-07-09: 스캔 스윕(scan -> scan_b) 범위. 실측 완료 — Y축으로만 이동.
+    "scan_b": [560.37, -121.8, 460.56, 44.09, 175.79, -130.28],
     "target1": [200.0, 100.0, 466.058, 138.332, -179.994, -43.561],
     "target2": [199.91, 0.066, 466.172, 177.529, 179.942, -2.8],
     "target3": [199.93, 100.092, 466.217, 174.166, 179.947, -6.174],
@@ -177,7 +179,10 @@ class BrainNode(Node):
                 self.get_logger().warn(f"'{target}' 좌표가 아직 채워지지 않음")
                 continue
 
-            pick_res = self._send_pick(obj, scan_pose)
+            # source(예: "scan")의 짝(예: "scan_b")이 POSITION_COORDS에 있으면 그 사이를
+            # 스윕하며 탐색한다(2026-07-09). 없으면 scan_pose 한 지점만 보는 기존 동작.
+            scan_pose_b = POSITION_COORDS.get(f"{source}_b")
+            pick_res = self._send_pick(obj, scan_pose, scan_pose_b)
             if pick_res is None or not pick_res.success:
                 reason = pick_res.message if pick_res else "no result"
                 self.get_logger().warn(f"'{obj}' Pick 실패({reason}), 이번 물체 건너뜀")
@@ -222,10 +227,11 @@ class BrainNode(Node):
         goal.label = label
         return self._send_goal_and_wait(self.moveto_client, goal, "MoveTo")
 
-    def _send_pick(self, obj, scan_pose):
+    def _send_pick(self, obj, scan_pose, scan_pose_b=None):
         goal = Pick.Goal()
         goal.object_label = obj
         goal.scan_pose = [float(v) for v in scan_pose]
+        goal.scan_pose_b = [float(v) for v in scan_pose_b] if scan_pose_b else []
         return self._send_goal_and_wait(self.pick_client, goal, "Pick")
 
     def _send_place(self, target_pose):

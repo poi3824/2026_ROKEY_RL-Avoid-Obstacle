@@ -90,6 +90,35 @@ class YoloModel:
                     detected = True
         return detected
 
+    def is_fully_visible(self, frame, target, confidence_threshold=0.6, edge_margin_px=10):
+        """단일 프레임 1장으로 target이 확실히 검출되고, bbox가 프레임 가장자리
+        (edge_margin_px 이내)에 안 닿는지(=잘리지 않고 온전히 보이는지) 확인한다.
+
+        2026-07-09: 스캔 스윕(motion_executor.sweep_to_detect) 중 반복 호출용 —
+        has_label과 같은 가벼운 단일 프레임 경로다. 물체가 프레임 가장자리에
+        걸려 반만 보이면 세그멘테이션 마스크가 잘린 채로 잡혀서 grasp 각도가
+        틀리게 나오는데(마스크 자체가 편향된 거라 여러 프레임 모아도 못 고침),
+        여기서는 "완전히 보이는지"만 확인하고 실제 정밀 탐지(get_best_detection의
+        8프레임 융합)는 로봇을 멈춘 뒤 따로 수행한다.
+        """
+        if frame is None:
+            return False
+        h, w = frame.shape[:2]
+        label_id = self.reversed_class_dict[target]
+        with self._model_lock:
+            results = self.model([frame], verbose=False)
+        for res in results:
+            boxes = res.boxes.xyxy.tolist()
+            for box, score, label in zip(boxes, res.boxes.conf.tolist(), res.boxes.cls.tolist()):
+                if int(label) != label_id or score < confidence_threshold:
+                    continue
+                x1, y1, x2, y2 = box
+                if x1 < edge_margin_px or y1 < edge_margin_px or \
+                        x2 > w - edge_margin_px or y2 > h - edge_margin_px:
+                    continue
+                return True
+        return False
+
     def get_best_detection(self, img_node, target):
         """bbox/score에 더해, seg 모델이면 grasp용 짧은 변 각도(angle_deg)와
         마스크 중심 픽셀(mask_center)도 반환한다.

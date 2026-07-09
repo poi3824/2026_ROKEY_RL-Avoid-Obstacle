@@ -35,7 +35,7 @@ import DR_init
 
 from std_msgs.msg import Bool
 from sensor_msgs.msg import JointState
-from od_msg.srv import SrvDepthPosition
+from od_msg.srv import SrvDepthPosition, SrvVisibilityCheck
 from dsr_msgs2.srv import MoveStop
 from ament_index_python.packages import get_package_share_directory
 
@@ -64,6 +64,10 @@ MIN_DEPTH = 40.0
 # 안팎이다. hand 감지 타이머와의 경합, 카메라/네트워크 지연 여유를 감안해
 # 6초로 줄인다.
 GET_TARGET_TIMEOUT = 6.0
+# 2026-07-09: /check_visibility는 단일 프레임(~0.1초)만 보는 가벼운 경로라
+# GET_TARGET_TIMEOUT보다 훨씬 짧게 잡는다 — 스윕 폴링 루프 안에서 반복 호출되므로
+# 오래 걸리면 스윕 반응성 자체가 떨어진다.
+CHECK_VISIBILITY_TIMEOUT = 2.0
 GET_SURFACE_Z_SAMPLES = 5  # 팔이 settle 중이거나 depth가 순간적으로 튀는 프레임을 걸러내기 위한 샘플 수
 GET_SURFACE_Z_SAMPLE_INTERVAL = 0.1  # 샘플 사이 간격(초)
 
@@ -189,6 +193,14 @@ class MotionNode(Node):
         while not self.get_position_client.wait_for_service(timeout_sec=3.0):
             self.get_logger().info("Waiting for get_3d_position service...")
         self.get_position_request = SrvDepthPosition.Request()
+
+        # 2026-07-09: 스캔 스윕(sweep_to_detect) 중 반복 호출하는 가벼운 가시성 체크.
+        self.check_visibility_client = self.create_client(
+            SrvVisibilityCheck, "/check_visibility", callback_group=self.cbg
+        )
+        while not self.check_visibility_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info("Waiting for check_visibility service...")
+        self.check_visibility_request = SrvVisibilityCheck.Request()
 
         # /safety/state 구독 — 발행자(safety_monitor)와 QoS(transient_local/reliable) 일치.
         safety_qos = QoSProfile(depth=1)
@@ -348,7 +360,8 @@ class MotionNode(Node):
     def _do_pick(self, goal_handle):
         obj = goal_handle.request.object_label
         scan_pose = list(goal_handle.request.scan_pose)
-        self.get_logger().info(f"[Pick] object={obj} scan_pose={scan_pose}")
+        scan_pose_b = list(goal_handle.request.scan_pose_b)
+        self.get_logger().info(f"[Pick] object={obj} scan_pose={scan_pose} scan_pose_b={scan_pose_b}")
 
         result = Pick.Result()
         fb = Pick.Feedback()
@@ -360,7 +373,22 @@ class MotionNode(Node):
 
         try:
             send_feedback("scanning", 0)
-            self.motion.move_to_scan(scan_pose)
+            # 2026-07-09: scan_pose_b가 있으면 scan_pose->scan_pose_b로 스윕하며 물체가
+            # 온전히(잘리지 않고) 보일 때까지 탐색한다 — 고정 스캔 위치 하나로는 물체가
+            # 프레임 가장자리에 걸려 반만 보여서 grasp 각도가 틀리는 경우가 있었다.
+            # scan_pose_b가 없으면(하위 호환) 기존처럼 scan_pose 한 지점만 본다.
+            if scan_pose_b:
+                found = self.motion.sweep_to_detect(
+                    scan_pose, scan_pose_b, lambda: self._check_visible(obj),
+                )
+                if not found:
+                    goal_handle.abort()
+                    result.success = False
+                    result.picked_pose = []
+                    result.message = f"스캔 스윕 실패: {obj}"
+                    return result
+            else:
+                self.motion.move_to_scan(scan_pose)
 
             source_pos = self.get_target_pos(obj)
             if source_pos is None:
@@ -443,6 +471,17 @@ class MotionNode(Node):
                 return None
             time.sleep(0.01)
         return future.result()
+
+    def _check_visible(self, label):
+        """스캔 스윕 중 반복 호출되는 가벼운 단일 프레임 가시성 체크(/check_visibility).
+
+        get_target_pos(8프레임 융합, ~1초)와 달리 프레임 1장만 보는 빠른 경로라
+        sweep_to_detect의 폴링 루프 안에서 반복 호출해도 부담이 적다.
+        """
+        self.check_visibility_request.target = label
+        future = self.check_visibility_client.call_async(self.check_visibility_request)
+        result = self._wait_for(future, timeout_sec=CHECK_VISIBILITY_TIMEOUT)
+        return bool(result is not None and result.visible)
 
     def get_target_pos(self, label):
         """realsense로 label의 depth를 찍어 베이스 좌표 + grasp orientation을 반환한다."""

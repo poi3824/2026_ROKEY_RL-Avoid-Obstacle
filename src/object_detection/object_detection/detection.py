@@ -8,7 +8,7 @@ from rclpy.executors import MultiThreadedExecutor
 from typing import Any, Callable, Optional, Tuple
 
 from ament_index_python.packages import get_package_share_directory
-from od_msg.srv import SrvDepthPosition
+from od_msg.srv import SrvDepthPosition, SrvVisibilityCheck
 from std_msgs.msg import Bool
 from object_detection.realsense import ImgNode
 from object_detection.yolo import YoloModel
@@ -55,11 +55,21 @@ class ObjectDetectionNode(Node):
         # 별도 콜백그룹으로 나누고 MultiThreadedExecutor로 진짜 동시에 돌린다.
         self._depth_cbg = MutuallyExclusiveCallbackGroup()
         self._hand_cbg = MutuallyExclusiveCallbackGroup()
+        # 2026-07-09: 스캔 스윕(motion_executor.sweep_to_detect) 중 반복 호출되는
+        # 가벼운 단일 프레임 가시성 체크. get_3d_position(무거운 8프레임 융합)이나
+        # hand 감지 타이머와 자원 경합하면 안 되므로 별도 콜백그룹으로 분리한다.
+        self._visibility_cbg = MutuallyExclusiveCallbackGroup()
         self.create_service(
             SrvDepthPosition,
             'get_3d_position',
             self.handle_get_depth,
             callback_group=self._depth_cbg,
+        )
+        self.create_service(
+            SrvVisibilityCheck,
+            'check_visibility',
+            self.handle_check_visibility,
+            callback_group=self._visibility_cbg,
         )
         self.hand_detected_pub = self.create_publisher(Bool, 'hand_detected', 10)
         self._hand_history = deque(maxlen=HAND_BUFFER_SIZE)
@@ -105,6 +115,19 @@ class ObjectDetectionNode(Node):
         x, y, z, angle_deg = self._compute_position(request.target)
         response.depth_position = [float(x), float(y), float(z)]
         response.angle_deg = float(angle_deg)
+        return response
+
+    def handle_check_visibility(self, request, response):
+        """스캔 스윕 중 반복 호출되는 가벼운 단일 프레임 가시성 체크.
+
+        get_3d_position(8프레임 융합)과 달리 프레임 1장만 돌려서 "물체가 잘리지
+        않고 온전히 보이는지"만 빠르게 확인한다 — 실제 정밀 좌표/각도 계산은
+        스윕이 멈춘 뒤 get_3d_position으로 따로 한다.
+        """
+        with self.img_node.spin_lock:
+            rclpy.spin_once(self.img_node, timeout_sec=0)
+        frame = self.img_node.get_color_frame()
+        response.visible = self.model.is_fully_visible(frame, request.target)
         return response
 
     def _compute_position(self, target):
@@ -192,7 +215,7 @@ class ObjectDetectionNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = ObjectDetectionNode()
-    executor = MultiThreadedExecutor(num_threads=2)
+    executor = MultiThreadedExecutor(num_threads=3)
     executor.add_node(node)
     try:
         executor.spin()
