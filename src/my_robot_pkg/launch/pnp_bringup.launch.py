@@ -9,7 +9,12 @@
 #   get_keyword_node      : STT (웨이크워드 → STT → LLM), 음성정지 → /voice/estop
 #   safety_monitor_node   : /hand_detected + /voice/estop 감시 → /safety/state, 하드정지
 #   motion_node           : dsr_node + MotionExecutor + Action server(MoveTo/Pick/Place)
-#   brain_node            : 오케스트레이터. get_keyword 수신 → Pick/Place goal
+#   brain_node            : 오케스트레이터. get_keyword 수신 → Pick/Place goal,
+#                            WORLD_MAP 명령 수신 시 update_world_map 서비스 호출
+#   world_map_node        : MoveLine으로 스캔 경로를 훑고 DBSCAN 클러스터링해서
+#                            /world_map/obstacles publish (update_world_map 서비스 제공)
+#   rl_avoidance_node     : /world_map/obstacles 구독(장애물 맵 캐시) + /obstacle_state
+#                            구독 → /avoidance_cmd publish. policy 로드/추론은 아직 stub.
 #
 # 사용:
 #   ros2 launch my_robot_pkg pnp_bringup.launch.py
@@ -17,7 +22,9 @@
 #
 # 기동 순서는 신경 쓰지 않아도 된다 — 각 노드가 wait_for_service/wait_for_server로
 # 상대가 뜰 때까지 기다린다(motion은 get_3d_position을, brain은 get_keyword와 motion
-# 액션 서버를 기다림).
+# 액션 서버를 기다림). world_map_node/rl_avoidance_node는 서로/brain_node를 기다리지
+# 않고 각자 독립적으로 뜬다 — world_map_node는 update_world_map 서비스가 호출될 때만
+# 실제로 MoveLine을 사용한다.
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -55,6 +62,14 @@ def generate_launch_description():
         package="my_robot_pkg", executable="brain_node",
         name="brain_node", output="screen",
     )
+    world_map_node = Node(
+        package="pointcloud_perception", executable="world_map_node",
+        name="world_map_node", output="screen",
+    )
+    rl_avoidance_node = Node(
+        package="obstacle_avoidance", executable="rl_avoidance_node",
+        name="rl_avoidance_node", output="screen",
+    )
 
     return LaunchDescription(args + [
         object_detection_node,
@@ -62,4 +77,6 @@ def generate_launch_description():
         safety_monitor_node,
         motion_node,
         brain_node,
+        world_map_node,
+        rl_avoidance_node,
     ])

@@ -16,7 +16,7 @@ import numpy as np
 PACKAGE_NAME = "object_detection"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 
-YOLO_MODEL_FILENAME = "final_seg_model_260708.pt"
+YOLO_MODEL_FILENAME = "finetune_260709-yolov8s.pt"
 YOLO_CLASS_NAME_JSON = "class_name_tool.json"
 
 YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)

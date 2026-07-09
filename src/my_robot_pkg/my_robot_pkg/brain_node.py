@@ -43,6 +43,12 @@ from robot_interfaces.msg import SafetyState
 # 공용으로 써도 실패 감지가 최대 130s 늦어질 뿐 안전엔 문제없어 하나로 통일한다.
 ACTION_RESULT_TIMEOUT_SEC = 130.0
 
+# world_map_node의 update_world_map 서비스 타임아웃. run_scan()은 지그재그 그리드
+# 전체를 MoveLine으로 훑는 구조라 pose마다 이동 + settle(1.2~3s)이 누적돼 실측상
+# 수 분이 걸린다(world_map_node.py 주석 참고). ACTION_RESULT_TIMEOUT_SEC(Pick/Place
+# 기준 130s)보다 훨씬 크게 잡아야 정상 스캔 도중 끊기지 않는다.
+WORLD_MAP_SCAN_TIMEOUT_SEC = 600.0
+
 POSITION_COORDS = {
     "home": [417.61, -0.76, 477.45, 174.25, 179.99, -7.65],
     "scan": [603.65, 117.06, 466.15, 96.74, -179.75, -85.08],
@@ -70,6 +76,12 @@ class BrainNode(Node):
 
         # safety reset (ESTOP 래치 해제)
         self.safety_reset_client = self.create_client(Trigger, "/safety/reset")
+
+        # world map (STT "월드맵 업데이트" 트리거). get_keyword_client와 달리
+        # 생성자에서 blocking 대기하지 않는다 — world_map_node가 안 떠 있어도
+        # pick-and-place만으로 brain_node가 뜰 수 있어야 하므로, 서비스 준비
+        # 여부는 호출 시점에 확인한다(safety_reset_client와 동일한 패턴).
+        self.world_map_client = self.create_client(Trigger, "update_world_map")
 
         # 2026-07-08: TTS. 상태 전환 시 get_keyword_node로 말할 텍스트를 던진다
         # (get_keyword_node가 재생 + 웨이크워드 피드백 루프 차단까지 담당).
@@ -145,6 +157,13 @@ class BrainNode(Node):
             self.get_logger().warn("STOP 명령 수신(무시) — 안전 정지는 safety_monitor가 처리")
             return
 
+        # 월드맵 스캔 명령. 프롬프트 규칙상 STOP과 겹치면 STOP이 우선이라
+        # 이 시점에는 이미 STOP이 아님이 보장된다.
+        if "WORLD_MAP" in objects:
+            self.get_logger().warn("월드맵 업데이트 명령 수신")
+            self._update_world_map()
+            return
+
         # RESUME은 STOP과 달리 get_keyword_node가 로컬에서 즉시 처리하지 않고
         # LLM 분류를 거쳐 여기로 온다(마이크 인식 오탐 방지). 여기서는 안전 래치만
         # 풀어준다 — 멈춰있던 동안 상황이 바뀌었을 수 있으니 하던 작업을 자동으로
@@ -215,6 +234,31 @@ class BrainNode(Node):
                 self.get_logger().warn("/safety/reset 서비스 없음 — 리셋 생략")
                 return
         self._call_service(self.safety_reset_client, Trigger.Request(), timeout_sec=2.0)
+
+    def _update_world_map(self):
+        if not self.world_map_client.service_is_ready():
+            if not self.world_map_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn("update_world_map 서비스 없음 — 생략")
+                self._say("월드맵 서비스에 연결할 수 없습니다")
+                return
+
+        self._say("월드맵 스캔을 시작합니다")
+        result = self._call_service(
+            self.world_map_client, Trigger.Request(), timeout_sec=WORLD_MAP_SCAN_TIMEOUT_SEC
+        )
+
+        if result is None:
+            self.get_logger().error(f"world map 스캔 타임아웃({WORLD_MAP_SCAN_TIMEOUT_SEC}s)")
+            self._say("월드맵 스캔이 시간 초과되었습니다")
+            return
+
+        if not result.success:
+            self.get_logger().warn(f"world map 스캔 실패: {result.message}")
+            self._say("월드맵 스캔에 실패했습니다")
+            return
+
+        self.get_logger().info(f"world map 스캔 완료: {result.message}")
+        self._say("월드맵 스캔을 완료했습니다")
 
     def _send_move_to(self, pose, label=""):
         goal = MoveTo.Goal()
