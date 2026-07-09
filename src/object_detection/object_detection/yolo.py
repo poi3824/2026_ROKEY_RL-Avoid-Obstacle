@@ -28,7 +28,7 @@ YOLO_JSON_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_CLASS_NAME_JSON)
 # 대신 개수 기반 캡은 그대로 유지하고(배치 크기=추론 시간 예측 가능성 유지),
 # 여유가 생긴 만큼 개수만 늘려서 융합 정확도를 높인다.
 FUSION_FRAME_COUNT = 8
-GET_FRAMES_MAX_WAIT_SEC = 5.0  # 카메라가 멈춰있는 경우를 대비한 안전장치
+GET_FRAMES_MAX_WAIT_SEC = 5.0  # 카메라가 멈춰있는 경우를 대비한 안전장치ㄹ
 
 
 class YoloModel:

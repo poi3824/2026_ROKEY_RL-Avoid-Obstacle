@@ -280,7 +280,6 @@ class MotionNode(Node):
                 self.motion.go_home(pose)
             else:
                 self.motion.move_linear(pose)
-                self.motion.wait()
         except EmergencyStop:
             goal_handle.abort()
             result.success = False
