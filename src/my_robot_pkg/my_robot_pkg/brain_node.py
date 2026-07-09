@@ -41,7 +41,12 @@ from robot_interfaces.msg import SafetyState
 #   => 3 * (30 + 3) + 2 * 6 ≈ 111s. 여유를 더해 130s로 잡는다.
 # MoveTo/Place는 이보다 훨씬 짧게 끝나지만(get_surface_z 호출이 0~1회) 같은 상수를
 # 공용으로 써도 실패 감지가 최대 130s 늦어질 뿐 안전엔 문제없어 하나로 통일한다.
-ACTION_RESULT_TIMEOUT_SEC = 130.0
+#
+# 2026-07-09: ESTOP이 이제 액션을 중단(abort)하지 않고 그 자리에서 대기하다가
+# RESUME 시 하던 동작을 이어간다(motion_executor._handle_interrupts 참고). 즉
+# 정지 상태로 있는 시간도 이 타임아웃에 그대로 들어간다 — 사용자가 "다시 시작해"를
+# 말하기까지 4분 이상은 안 걸릴 거라는 판단 하에 여유를 두고 360s로 늘린다.
+ACTION_RESULT_TIMEOUT_SEC = 360.0
 
 # world_map_node의 update_world_map 서비스 타임아웃. run_scan()은 지그재그 그리드
 # 전체를 MoveLine으로 훑는 구조라 pose마다 이동 + settle(1.2~3s)이 누적돼 실측상

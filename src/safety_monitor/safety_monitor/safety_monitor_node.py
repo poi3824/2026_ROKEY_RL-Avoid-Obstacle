@@ -21,7 +21,12 @@ from robot_interfaces.msg import SafetyState
 
 # ESTOP 시 로봇 컨트롤러에 보낼 하드 정지 강도.
 # 0=QSTOP_STO(서보 토크 차단, 가장 강력), 1=QSTOP, 2=SSTOP, 3=HOLD.
-ESTOP_STOP_MODE = 0
+# 2026-07-09: QSTOP_STO(0)는 서보 토크를 차단해서, 재개하려면 컨트롤러가
+# 재서보/재초기화하는 과정에서 홈으로 이동하는 것 같은 부작용이 있었다.
+# HOLD(3)는 서보 토크를 유지한 채 그 자리에서 멈추므로, RESUME 시 같은
+# 목적지로 movel을 다시 issue하는 것만으로 하던 동작을 이어갈 수 있다
+# (motion_executor._handle_interrupts의 hand_pause와 동일한 재개 방식).
+ESTOP_STOP_MODE = 3
 
 # /safety/state를 주기적으로도 재발행해서(하트비트) 늦게 뜬 구독자나 메시지 유실에
 # 대비한다. 상태가 바뀌는 순간에는 이 타이머와 별개로 즉시 발행한다.

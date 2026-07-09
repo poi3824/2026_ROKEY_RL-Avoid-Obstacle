@@ -39,6 +39,9 @@ PICK_MAX_ATTEMPTS = 3  # 최초 시도 + 재시도 2회
 # emergency_stop의 stop_mode=0(QSTOP_STO)과 달리 서보 토크를 유지하므로,
 # 손이 치워지면 같은 목적지로 movel을 다시 issue하는 것만으로 재개할 수 있다.
 HAND_PAUSE_STOP_MODE = 1
+# 2026-07-09: safety_monitor.ESTOP_STOP_MODE와 동일한 값(HOLD) — 서보 토크를
+# 유지한 채 멈추므로 RESUME 시 같은 posx로 movel을 다시 issue해 이어갈 수 있다.
+ESTOP_HOLD_STOP_MODE = 3
 
 MOTION_START_SETTLE_SEC = 0.15
 
@@ -92,28 +95,33 @@ class MotionExecutor:
     def _handle_interrupts(self, posx, velocity, acc):
         """이동 폴링 도중 응급정지/손 감지 일시정지를 처리한다.
 
-        move_linear와 sweep_to_detect가 공유하는 헬퍼다(2026-07-09 리팩터링 —
-        원래 move_linear 안에 있던 로직을 그대로 뽑아낸 것, 동작 변화 없음).
+        move_linear와 sweep_to_detect가 공유하는 헬퍼다.
 
-        응급정지면 stop() 호출 후 EmergencyStop을 발생시켜 상위(pick/place/스윕)의
-        나머지 단계를 중단시킨다. 손 일시정지면 stop_mode=1로 멈췄다가, 이벤트가
-        풀리면 같은 posx로 movel을 다시 issue해서 이동을 재개한다 — 응급정지와
-        달리 여기서 함수가 끝나지 않고 계속 진행된다.
+        2026-07-09: 응급정지도 손 감지 일시정지와 똑같이 "그 자리에서 홀드 후
+        재개" 방식으로 바뀌었다(이전엔 액션 자체를 중단시켰는데, 사용자가 "정지"
+        후 "다시 시작해"라고 하면 하던 동작을 그대로 이어가길 원해서 바꿈).
+        safety_monitor의 ESTOP_STOP_MODE가 HOLD(서보 토크 유지)로 바뀐 덕에,
+        정지 뒤에도 같은 posx로 movel을 다시 issue하는 것만으로 이동을 이어갈
+        수 있다. 응급정지/손 일시정지 둘 다 같은 방식이라 하나로 합쳤다 —
+        둘 중 하나라도 활성 상태면 멈추고, 둘 다 풀릴 때까지 기다렸다가 재개한다.
         """
-        if self._estop_event is not None and self._estop_event.is_set():
-            self._stop()
-            raise EmergencyStop("이동 중 응급 정지 감지")
+        estop_active = self._estop_event is not None and self._estop_event.is_set()
+        hand_active = self._hand_pause_event is not None and self._hand_pause_event.is_set()
+        if not (estop_active or hand_active):
+            return
 
-        if self._hand_pause_event is not None and self._hand_pause_event.is_set():
-            self._stop(HAND_PAUSE_STOP_MODE)
-            while self._hand_pause_event.is_set():
-                if self._estop_event is not None and self._estop_event.is_set():
-                    raise EmergencyStop("일시정지 중 응급 정지 감지")
-                time.sleep(MOTION_POLL_INTERVAL)
-            with self._dsr_lock:
-                self._movel(posx, velocity, acc)  # 같은 목적지로 재개
-            # 재개도 amovel 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
-            time.sleep(MOTION_START_SETTLE_SEC)
+        self._stop(ESTOP_HOLD_STOP_MODE if estop_active else HAND_PAUSE_STOP_MODE)
+        while True:
+            estop_active = self._estop_event is not None and self._estop_event.is_set()
+            hand_active = self._hand_pause_event is not None and self._hand_pause_event.is_set()
+            if not (estop_active or hand_active):
+                break
+            time.sleep(MOTION_POLL_INTERVAL)
+
+        with self._dsr_lock:
+            self._movel(posx, velocity, acc)  # 같은 목적지로 재개
+        # 재개도 amovel 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
+        time.sleep(MOTION_START_SETTLE_SEC)
 
     def move_linear(self, posx):
         """amovel로 이동 명령을 큐잉하고, check_motion()을 폴링하며 완료를 기다린다.
@@ -142,9 +150,6 @@ class MotionExecutor:
 
             self._handle_interrupts(posx, self.velocity, self.acc)
             time.sleep(MOTION_POLL_INTERVAL)
-
-        if self._estop_event is not None and self._estop_event.is_set():
-            raise EmergencyStop("이동 중 응급 정지 감지")
 
     def sweep_to_detect(self, pose_a, pose_b, is_visible_cb,
                         visibility_check_interval=SWEEP_VISIBILITY_CHECK_INTERVAL_SEC):
@@ -192,9 +197,6 @@ class MotionExecutor:
                     return True
 
             time.sleep(MOTION_POLL_INTERVAL)
-
-        if self._estop_event is not None and self._estop_event.is_set():
-            raise EmergencyStop("스윕 중 응급 정지 감지")
 
         # pose_b에 막 도착한 순간은 마지막 주기적 체크를 놓쳤을 수 있으니 한 번 더 확인.
         return is_visible_cb()
