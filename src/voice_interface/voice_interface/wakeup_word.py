@@ -39,3 +39,11 @@ class WakeupWord:
     def set_stream(self, stream):
         self.model = Model(wakeword_models=[MODEL_PATH])
         self.stream = stream
+
+    def reset(self):
+        """예측/오디오 피처 버퍼를 초기화한다.
+
+        2026-07-09: 5초 말하고 뒤에 오탐하는거 리셋
+        """
+        if self.model is not None:
+            self.model.reset()

@@ -458,6 +458,12 @@ RESUME / RESUME / RESUME / RESUME
             # 대기로 돌아가기 직전에 한 번 더 비운다(실측: 이게 없으면 명령 처리
             # 끝나자마자 안 부른 웨이크워드가 또 감지됨).
             self._flush_mic_stream()
+            # 2026-07-09: 위 플러시는 원본 오디오 버퍼만 비운다 — openWakeWord
+            # 모델 내부의 예측/피처 히스토리 버퍼는 안 비워져서, STT+LLM 처리
+            # 몇 초 동안 predict()가 안 불리다가 세션 끝나고 다시 불리면 그
+            # 불연속으로 여전히 오탐(실측: 처리 완료 67ms 만에 재감지)이 났다.
+            # 모델 자체를 리셋해서 항상 "방금 시작한" 상태로 판단하게 한다.
+            self.wakeup_word.reset()
 
     def _flush_mic_stream(self):
         """STT(sounddevice) 녹음 동안 밀린 PyAudio 웨이크워드 스트림 버퍼를 비운다.
