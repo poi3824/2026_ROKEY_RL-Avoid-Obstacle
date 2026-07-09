@@ -10,6 +10,7 @@ Register map (OnRobot RG protocol):
 """
 import socket
 import struct
+import threading
 import time
 
 _MODBUS_UNIT = 65
@@ -26,6 +27,12 @@ class RG2Gripper:
         self.max_force = max_force
         self._sock = None
         self._txid = 0
+        # 2026-07-09: motion_node가 MultiThreadedExecutor(4)라, pick/place 도중의
+        # 그리퍼 명령/폭 조회와 rviz 조인트 애니메이션용 주기 타이머가 서로 다른
+        # 스레드에서 같은 소켓을 동시에 건드릴 수 있다. 응답을 txid로 매칭하지
+        # 않고 그냥 recv()하므로, 동시 호출 시 서로 다른 요청의 응답을 바꿔 읽는
+        # 문제를 막기 위해 소켓을 건드리는 두 메서드를 이 락으로 직렬화한다.
+        self._lock = threading.Lock()
         self._connect()
 
     def _connect(self):
@@ -42,38 +49,40 @@ class RG2Gripper:
         return self._txid
 
     def _read_holding_registers(self, address, count=1):
-        for _ in range(2):
-            if self._sock is None:
-                self._connect()
-            if self._sock is None:
-                return None
-            try:
-                txid = self._next_txid()
-                req = struct.pack('>HHHBBHH', txid, 0, 6, _MODBUS_UNIT, 3, address, count)
-                self._sock.sendall(req)
-                resp = self._sock.recv(256)
-                if len(resp) >= 9 + 2 * count:
-                    return struct.unpack(f'>{count}H', resp[9:9 + 2 * count])
-            except Exception:
-                self._sock = None
+        with self._lock:
+            for _ in range(2):
+                if self._sock is None:
+                    self._connect()
+                if self._sock is None:
+                    return None
+                try:
+                    txid = self._next_txid()
+                    req = struct.pack('>HHHBBHH', txid, 0, 6, _MODBUS_UNIT, 3, address, count)
+                    self._sock.sendall(req)
+                    resp = self._sock.recv(256)
+                    if len(resp) >= 9 + 2 * count:
+                        return struct.unpack(f'>{count}H', resp[9:9 + 2 * count])
+                except Exception:
+                    self._sock = None
         return None
 
     def _write_multiple_registers(self, address, values):
-        for _ in range(2):
-            if self._sock is None:
-                self._connect()
-            if self._sock is None:
-                return False
-            try:
-                txid = self._next_txid()
-                count = len(values)
-                pdu = struct.pack('>BHHB', 16, address, count, count * 2) + struct.pack(f'>{count}H', *values)
-                header = struct.pack('>HHHB', txid, 0, len(pdu) + 1, _MODBUS_UNIT)
-                self._sock.sendall(header + pdu)
-                resp = self._sock.recv(256)
-                return len(resp) >= 12
-            except Exception:
-                self._sock = None
+        with self._lock:
+            for _ in range(2):
+                if self._sock is None:
+                    self._connect()
+                if self._sock is None:
+                    return False
+                try:
+                    txid = self._next_txid()
+                    count = len(values)
+                    pdu = struct.pack('>BHHB', 16, address, count, count * 2) + struct.pack(f'>{count}H', *values)
+                    header = struct.pack('>HHHB', txid, 0, len(pdu) + 1, _MODBUS_UNIT)
+                    self._sock.sendall(header + pdu)
+                    resp = self._sock.recv(256)
+                    return len(resp) >= 12
+                except Exception:
+                    self._sock = None
         return False
 
     def get_status(self):

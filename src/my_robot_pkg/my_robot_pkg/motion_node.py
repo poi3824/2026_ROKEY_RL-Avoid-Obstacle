@@ -34,6 +34,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 import DR_init
 
 from std_msgs.msg import Bool
+from sensor_msgs.msg import JointState
 from od_msg.srv import SrvDepthPosition
 from dsr_msgs2.srv import MoveStop
 from ament_index_python.packages import get_package_share_directory
@@ -49,7 +50,7 @@ PACKAGE_PATH = get_package_share_directory("my_robot_pkg")
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
-VELOCITY, ACC = 30, 30
+VELOCITY, ACC = 60, 60
 
 TOOLCHARGER_IP = "192.168.1.1"
 TOOLCHARGER_PORT = "502"
@@ -73,6 +74,38 @@ GET_SURFACE_Z_SAMPLE_INTERVAL = 0.1  # 샘플 사이 간격(초)
 # TODO(hardware calibration): 실제 장비에서 측정해 채운다.
 GRASP_AXIS_IMG_ANGLE_DEG = 0.0
 GRASP_ANGLE_SIGN = 1.0
+
+# 2026-07-09: rviz 그리퍼 애니메이션용. onrobot_rg_control(OnRobot 공식 ROS 드라이버)을
+# 그리퍼 제어와 같이 못 띄우는 이유는 README/커밋 로그 참고 — 같은 그리퍼(192.168.1.1:502)에
+# 두 클라이언트가 동시에 붙는 충돌이 있었다. 대신 그 드라이버가 쓰던 것과 동일한 RG2
+# 링크 기구학 공식(OnRobotRGControllerServer.widthToJointValue)으로, 여기서 이미 열려있는
+# gripper 소켓의 실측 폭만 읽어 조인트 각도를 계산해 퍼블리시한다 — 새 Modbus 연결 없음.
+RG2_L1 = 0.108505
+RG2_L3 = 0.055
+RG2_THETA1 = 1.41371
+RG2_THETA3 = 0.76794
+RG2_DY = -0.0144
+RG2_JOINT_NAMES = [
+    'rg2_finger_joint',
+    'rg2_left_inner_knuckle_joint',
+    'rg2_left_inner_finger_joint',
+    'rg2_right_outer_knuckle_joint',
+    'rg2_right_inner_knuckle_joint',
+    'rg2_right_inner_finger_joint',
+]
+RG2_MIMIC_RATIOS = [1, -1, 1, -1, -1, 1]
+GRIPPER_JOINT_PUBLISH_INTERVAL_SEC = 0.1
+
+
+def rg2_width_to_joint_angle(width_mm):
+    """그리퍼 실측 폭(mm)을 rg2_finger_joint 각도(rad)로 변환한다.
+
+    OnRobot 공식 ROS2 드라이버(onrobot_rg_control)의 RG2 링크 기구학 공식과 동일.
+    """
+    width_m = width_mm / 1000.0
+    ratio = (width_m / 2 - RG2_DY - RG2_L1 * np.cos(RG2_THETA1)) / RG2_L3
+    ratio = np.clip(ratio, -1.0, 1.0)
+    return float(np.arccos(ratio) - RG2_THETA3)
 
 
 def compute_grasp_c(current_c, angle_deg):
@@ -166,6 +199,15 @@ class MotionNode(Node):
             callback_group=self.cbg,
         )
 
+        # 2026-07-09: rviz 그리퍼 애니메이션. joint_state_publisher_node(m0609_rg2_bringup
+        # launch)가 source_list에서 이 토픽을 구독하고 있어서, 여기서 실측 폭 기반
+        # 조인트 각도만 채워주면 onrobot_rg_control 없이도 그리퍼가 rviz에서 움직인다.
+        self.gripper_joint_pub = self.create_publisher(JointState, "/gripper_joint_states", 10)
+        self.create_timer(
+            GRIPPER_JOINT_PUBLISH_INTERVAL_SEC, self._publish_gripper_joint_state,
+            callback_group=self.cbg,
+        )
+
         self.motion = MotionExecutor(
             amovel, movej, mwait, gripper, VELOCITY, ACC, stop,
             self.get_surface_z, self.get_target_pos, grip_min_width, self.pick_logger,
@@ -200,6 +242,18 @@ class MotionNode(Node):
         else:  # RUN
             estop_event.clear()
             hand_pause_event.clear()
+
+    def _publish_gripper_joint_state(self):
+        """실측 그리퍼 폭을 읽어 rviz용 rg2_* 조인트 각도를 퍼블리시한다."""
+        width_mm = gripper.get_width()
+        if width_mm is None:
+            return
+        angle = rg2_width_to_joint_angle(width_mm)
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = RG2_JOINT_NAMES
+        msg.position = [angle * ratio for ratio in RG2_MIMIC_RATIOS]
+        self.gripper_joint_pub.publish(msg)
 
     def _on_cancel(self, goal_handle):
         # 취소 요청도 응급 정지에 준해 처리한다(진행 중 move_linear가 멈추도록).
