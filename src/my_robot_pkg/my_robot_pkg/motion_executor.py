@@ -42,6 +42,15 @@ HAND_PAUSE_STOP_MODE = 1
 
 MOTION_START_SETTLE_SEC = 0.15
 
+# 2026-07-09: 스캔 스윕(sweep_to_detect) 전용 속도. ACTION_RESULT_TIMEOUT_SEC(130s,
+# brain_node)에 여유가 충분해서(스윕 거리 100~300mm 기준 7~20초) 굳이 느리게 갈
+# 필요는 없어 일반 이동과 같은 속도로 맞춘다.
+SWEEP_VELOCITY = 30.0
+SWEEP_ACC = 30.0
+# hand 감지 타이머와 같은 주기 — object_detection_node에 과도한 부하를 주지 않으면서도
+# 스윕 도중 물체가 보이면 충분히 빠르게 반응한다.
+SWEEP_VISIBILITY_CHECK_INTERVAL_SEC = 0.3
+
 
 class EmergencyStop(Exception):
     """move_linear가 폴링 도중 응급 정지 요청을 감지하면 발생시킨다."""
@@ -80,17 +89,38 @@ class MotionExecutor:
         # 막기 위해 이 락으로 감싼다.
         self._dsr_lock = dsr_lock if dsr_lock is not None else contextlib.nullcontext()
 
+    def _handle_interrupts(self, posx, velocity, acc):
+        """이동 폴링 도중 응급정지/손 감지 일시정지를 처리한다.
+
+        move_linear와 sweep_to_detect가 공유하는 헬퍼다(2026-07-09 리팩터링 —
+        원래 move_linear 안에 있던 로직을 그대로 뽑아낸 것, 동작 변화 없음).
+
+        응급정지면 stop() 호출 후 EmergencyStop을 발생시켜 상위(pick/place/스윕)의
+        나머지 단계를 중단시킨다. 손 일시정지면 stop_mode=1로 멈췄다가, 이벤트가
+        풀리면 같은 posx로 movel을 다시 issue해서 이동을 재개한다 — 응급정지와
+        달리 여기서 함수가 끝나지 않고 계속 진행된다.
+        """
+        if self._estop_event is not None and self._estop_event.is_set():
+            self._stop()
+            raise EmergencyStop("이동 중 응급 정지 감지")
+
+        if self._hand_pause_event is not None and self._hand_pause_event.is_set():
+            self._stop(HAND_PAUSE_STOP_MODE)
+            while self._hand_pause_event.is_set():
+                if self._estop_event is not None and self._estop_event.is_set():
+                    raise EmergencyStop("일시정지 중 응급 정지 감지")
+                time.sleep(MOTION_POLL_INTERVAL)
+            with self._dsr_lock:
+                self._movel(posx, velocity, acc)  # 같은 목적지로 재개
+            # 재개도 amovel 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
+            time.sleep(MOTION_START_SETTLE_SEC)
+
     def move_linear(self, posx):
         """amovel로 이동 명령을 큐잉하고, check_motion()을 폴링하며 완료를 기다린다.
 
         폴링 간격마다 dsr_node가 spin될 기회를 주기 때문에, 그 사이 들어온
-        /emergency_stop 요청이 이 함수가 리턴하기 전에 처리될 수 있다. 응급 정지가
-        감지되면 즉시 stop()을 호출하고 EmergencyStop을 발생시켜 pick/place/heard의
-        나머지 단계를 중단시킨다.
-
-        폴링 도중 hand_pause_event가 세팅되면(작업 공간에 손 감지) stop_mode=1로
-        일시정지하고, 이벤트가 풀릴 때까지 기다렸다가 같은 posx로 movel을 다시
-        issue해서 이동을 재개한다 — 응급 정지와 달리 여기서 함수가 끝나지 않는다.
+        /emergency_stop 요청이 이 함수가 리턴하기 전에 처리될 수 있다. 응급 정지/
+        손 감지 일시정지 처리는 _handle_interrupts()가 담당한다.
         """
         # self._stop은 (robot_action_node.stop) 자체적으로 dsr_lock을 잡으므로
         # 여기서는 self._movel/self._check_motion 호출만 감싼다 — self._stop
@@ -110,26 +140,64 @@ class MotionExecutor:
             if motion_state == _DR_STATE_IDLE:
                 break
 
-            if self._estop_event is not None and self._estop_event.is_set():
-                self._stop()
-                raise EmergencyStop("이동 중 응급 정지 감지")
-
-            if self._hand_pause_event is not None and self._hand_pause_event.is_set():
-                self._stop(HAND_PAUSE_STOP_MODE)
-                while self._hand_pause_event.is_set():
-                    if self._estop_event is not None and self._estop_event.is_set():
-                        raise EmergencyStop("일시정지 중 응급 정지 감지")
-                    time.sleep(MOTION_POLL_INTERVAL)
-                with self._dsr_lock:
-                    self._movel(posx, self.velocity, self.acc)  # 같은 목적지로 재개
-                # 재개도 amovel 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
-                time.sleep(MOTION_START_SETTLE_SEC)
-                continue
-
+            self._handle_interrupts(posx, self.velocity, self.acc)
             time.sleep(MOTION_POLL_INTERVAL)
 
         if self._estop_event is not None and self._estop_event.is_set():
             raise EmergencyStop("이동 중 응급 정지 감지")
+
+    def sweep_to_detect(self, pose_a, pose_b, is_visible_cb,
+                        visibility_check_interval=SWEEP_VISIBILITY_CHECK_INTERVAL_SEC):
+        """pose_a -> pose_b로 느리게(SWEEP_VELOCITY) 이동하며 물체가 온전히 보이는지
+        주기적으로 확인하다가, 보이는 즉시 멈추고 True를 반환한다.
+
+        2026-07-09: 고정 스캔 위치 하나만 보면 물체가 프레임 가장자리에 걸려
+        반만 보일 수 있고, 그러면 세그멘테이션 마스크가 잘려 grasp 각도가
+        틀리게 나온다(여러 프레임을 모아도 못 고치는 편향 — 실기로 확인됨).
+        그래서 스캔 범위를 두 지점으로 넓히되, 무거운 8프레임 융합 탐지
+        (get_best_detection)는 로봇이 완전히 멈춘 뒤에만 하고, 움직이는 동안은
+        is_visible_cb(가벼운 단일 프레임 체크)로 "잘리지 않고 온전히 보이는지"만
+        확인한다.
+
+        pose_a에서 이미 보이면 스윕 자체를 생략한다. pose_b까지 다 갔는데도
+        못 찾으면(왕복 없이) False를 반환한다 — 호출부(motion_node)가 기존
+        pick 실패와 동일하게 처리한다.
+        """
+        self.move_linear(pose_a)
+        self.wait()
+        if is_visible_cb():
+            return True
+
+        with self._dsr_lock:
+            self._movel(pose_b, SWEEP_VELOCITY, SWEEP_ACC)
+
+        if self._check_motion is None:
+            self._mwait()
+            return is_visible_cb()
+
+        time.sleep(MOTION_START_SETTLE_SEC)
+        last_check = time.time()
+        while True:
+            with self._dsr_lock:
+                motion_state = self._check_motion()
+            if motion_state == _DR_STATE_IDLE:
+                break
+
+            self._handle_interrupts(pose_b, SWEEP_VELOCITY, SWEEP_ACC)
+
+            if time.time() - last_check >= visibility_check_interval:
+                last_check = time.time()
+                if is_visible_cb():
+                    self._stop()
+                    return True
+
+            time.sleep(MOTION_POLL_INTERVAL)
+
+        if self._estop_event is not None and self._estop_event.is_set():
+            raise EmergencyStop("스윕 중 응급 정지 감지")
+
+        # pose_b에 막 도착한 순간은 마지막 주기적 체크를 놓쳤을 수 있으니 한 번 더 확인.
+        return is_visible_cb()
 
     def wait(self, seconds=None):
         if seconds is None:
