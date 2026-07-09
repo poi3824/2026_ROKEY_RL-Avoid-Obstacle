@@ -88,7 +88,7 @@ class GetKeyword(Node):
         print(PACKAGE_PATH, RESOURCE_PATH, ENV_PATH)
 
         self.llm = ChatOpenAI(
-            model="gpt-4o", temperature=0.5, openai_api_key=openai_api_key
+            model="gpt-4o", temperature=0, openai_api_key=openai_api_key
         )
 
         prompt_content = """
