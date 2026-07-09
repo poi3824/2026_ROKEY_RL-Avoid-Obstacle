@@ -129,6 +129,16 @@ class MotionExecutor:
         폴링 간격마다 dsr_node가 spin될 기회를 주기 때문에, 그 사이 들어온
         /emergency_stop 요청이 이 함수가 리턴하기 전에 처리될 수 있다. 응급 정지/
         손 감지 일시정지 처리는 _handle_interrupts()가 담당한다.
+
+        2026-07-09: amovel 직후 check_motion()이 아직 컨트롤러에 새 명령이
+        등록되기 전 상태(방금 끝난 이전 명령의 stale idle)를 읽고 너무 일찍
+        리턴하는 레이스가 실기에서 확인됐다(예: pick 성공 후 후퇴 이동을 건너뛰고
+        바로 다음 place 목적지로 가버림). 예전엔 호출부가 self.wait()(DSR_ROBOT2의
+        raw mwait())로 한 번 더 확인했는데, mwait()은 hand_pause_event/estop_event를
+        전혀 보지 않는 SDK 함수라(_handle_interrupts를 안 거침) 그 대기 도중 손이
+        들어와도 정지/재개가 안 되는 구멍이 새로 생겼다. 그래서 raw mwait() 대신
+        같은 인터럽트 인지 폴링(_poll_until_idle)을 두 번 돌려서 stale idle을
+        잡는다 — 두 번째 폴링 동안에도 손 감지/응급정지를 계속 체크한다.
         """
         # self._stop은 (robot_action_node.stop) 자체적으로 dsr_lock을 잡으므로
         # 여기서는 self._movel/self._check_motion 호출만 감싼다 — self._stop
@@ -141,12 +151,23 @@ class MotionExecutor:
             self._mwait()
             return
 
+        self._poll_until_idle(posx)
+        self._poll_until_idle(posx)  # stale-idle 재확인, 위 docstring 참고
+
+        if self._estop_event is not None and self._estop_event.is_set():
+            raise EmergencyStop("이동 중 응급 정지 감지")
+
+    def _poll_until_idle(self, posx):
+        """check_motion()이 IDLE을 보고할 때까지 폴링하며, 매 주기 _handle_interrupts()로
+        손 감지 일시정지/응급 정지를 처리한다. move_linear()가 이 함수를 연달아 두 번
+        호출해서 stale-idle 오탐을 잡는다(move_linear() docstring 참고).
+        """
         time.sleep(MOTION_START_SETTLE_SEC)
         while True:
             with self._dsr_lock:
-                motion_state = self._check_motion() # amovel 직후 0초 만에 바로 물어봄
+                motion_state = self._check_motion()
             if motion_state == _DR_STATE_IDLE:
-                break
+                return
 
             self._handle_interrupts(posx, self.velocity, self.acc)
             time.sleep(MOTION_POLL_INTERVAL)
@@ -169,7 +190,6 @@ class MotionExecutor:
         pick 실패와 동일하게 처리한다.
         """
         self.move_linear(pose_a)
-        self.wait()
         if is_visible_cb():
             return True
 
@@ -210,19 +230,16 @@ class MotionExecutor:
     def go_home(self, home_pos):
         """초기화 시 대기 위치로 이동하고 그리퍼를 연다 (robot_init 대응)."""
         self.move_linear(home_pos)
-        self.wait(1.0)
         self.gripper.open_gripper()
         self.wait(1.0)
 
     def return_home(self, home_pos):
         """작업 완료 후 대기 위치로 복귀한다 (그리퍼 조작 없음)."""
         self.move_linear(home_pos)
-        self.wait()
 
     def move_to_scan(self, scan_pos):
         """물체를 내려다보는 스캔 위치로 이동한다."""
         self.move_linear(scan_pos)
-        self.wait()
 
     def pick(self, source_pos, obj_label=None, feedback_cb=None):
         """source_pos 위 안전 hover 높이에서 depth를 확인하고 내려가 집는다.
@@ -249,12 +266,11 @@ class MotionExecutor:
                 feedback_cb("descending", attempt + 1)
 
             hover_pos = source_pos[:2] + [source_pos[2] + PICK_HOVER_HEIGHT] + source_pos[3:]
-            # moving_pos = source_pos[:2] + [source_pos[2] + PICK_RETRACT_Z + 100] + source_pos[3:]
             temp = copy.deepcopy(hover_pos)
             temp[2] = PICK_RETRACT_Z
             moving_pos = temp
+
             self.move_linear(hover_pos)
-            self.wait()
 
             surface_z = self.get_surface_z() if self.get_surface_z else None
             if surface_z is not None:
@@ -263,7 +279,6 @@ class MotionExecutor:
                 down_pos = source_pos
 
             self.move_linear(down_pos)
-            
 
             if feedback_cb:
                 feedback_cb("gripping", attempt + 1)
@@ -278,21 +293,16 @@ class MotionExecutor:
                 self.logger.log_attempt(
                     obj_label, attempt + 1, surface_z, width, grip_detected, motion_done, success,
                 )
-            
 
             if success:
-                # 2026-07-08: 여기 self.wait()가 빠진 채 time.sleep(0.15)만 있으면,
-                # move_linear(moving_pos)의 check_motion() 폴링이 아직 컨트롤러에 새
-                # 명령이 등록되기 전 상태(방금 끝난 이전 명령의 stale idle)를 읽고
-                # 너무 일찍 리턴할 수 있다. 그 직후 place()가 바로 target_pos로
-                # move_linear를 또 큐잉하면 컨트롤러가 두 명령을 블렌딩해서 Z축으로
-                # 물러나는 구간 없이 곧장 target_pos로 가버리는 문제가 있었다.
-                # hover_pos 이동(위쪽)과 동일하게 mwait()로 한 번 더 확인해서 막는다.
+                # 파지 성공 후 PICK_RETRACT_Z로 후퇴. 여기서 다음 move_linear(place
+                # 등)를 곧장 이어붙여도 안전한 이유는 move_linear() 자체의 stale-idle
+                # 재확인 로직(move_linear() docstring, 2026-07-09 참고)이 처리한다 —
+                # 예전엔 여기서 self.wait()를 따로 호출해서 막았었다.
                 self.move_linear(moving_pos)
-                self.wait()
                 return True
-                
-            else: 
+
+            else:
                 print(
                     f"[MotionExecutor] pick 실패 (attempt {attempt + 1}/{PICK_MAX_ATTEMPTS}): "
                     f"motion_done={motion_done} grip_detected={grip_detected} width={width}"
@@ -321,7 +331,6 @@ class MotionExecutor:
         target_pos 그대로 내려가는 것으로 fallback한다.
         """
         self.move_linear(target_pos)
-        self.wait()
 
         if feedback_cb:
             feedback_cb("descending")
