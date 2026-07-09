@@ -68,9 +68,10 @@ GET_SURFACE_Z_SAMPLE_INTERVAL = 0.1  # 샘플 사이 간격(초)
 
 # 세그멘테이션 기반 grasp yaw 계산용 캘리브레이션 상수 (robot_action_node에서 이관).
 # 카메라와 그리퍼가 손목에 함께 고정돼 회전하므로, 그리퍼 손가락이 닫히는 축은
-# 이미지 평면 기준 항상 같은 각도(GRASP_AXIS_IMG_ANGLE_DEG)에 보인다 — 실측 필요.
-# GRASP_ANGLE_SIGN은 이미지 각도가 +로 늘 때 C를 +/-로 돌려야 하는지 — 실측 필요.
-# TODO(hardware calibration): 실제 장비에서 측정해 채운다.
+# 이미지 평면 기준 항상 같은 각도(GRASP_AXIS_IMG_ANGLE_DEG)에 보인다.
+# 2026-07-09: 실제 장비로 캘리브레이션 완료 — 물체를 그리퍼 축에 맞춰 놓고 읽은
+# 각도가 0도(GRASP_AXIS_IMG_ANGLE_DEG), wrist를 +로 돌렸을 때 angle_deg도 +로
+# 움직이는 것 확인(GRASP_ANGLE_SIGN). 둘 다 기존 placeholder 값과 우연히 일치.
 GRASP_AXIS_IMG_ANGLE_DEG = 0.0
 GRASP_ANGLE_SIGN = 1.0
 

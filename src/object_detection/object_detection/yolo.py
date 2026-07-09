@@ -123,11 +123,19 @@ class YoloModel:
         return best_det["box"], best_det["score"], angle_deg, mask_center
 
     def _find_matching_mask_info(self, results, label_id, box, iou_threshold=0.3):
-        """box와 IoU가 가장 높은 마스크 하나를 골라 (짧은 변 각도, 마스크 중심 픽셀)을 반환한다.
+        """box와 IoU가 iou_threshold를 넘는 마스크들의 (짧은 변 각도, 마스크 중심 픽셀)을 반환한다.
 
-        여러 프레임에 걸쳐 박스는 평균으로 fuse하지만, 각도/마스크 중심은 fuse하지
-        않고(각도는 사각형 대칭성 때문에 단순 평균이 의미 없고, 마스크 중심도 같은
-        이유로) best match 프레임 하나만 쓴다.
+        마스크 중심은 IoU가 가장 높은 프레임 하나만 쓴다(무게중심은 mod-180 문제가
+        없지만, 어차피 depth 샘플링 지점 하나만 있으면 되므로 가장 신뢰도 높은
+        프레임 걸로 충분).
+
+        2026-07-09: 각도는 예전엔 best match 프레임 하나만 썼는데(세그멘테이션
+        마스크 경계가 프레임마다 픽셀 단위로 흔들려서 grasp yaw에 실측 2도 안팎의
+        노이즈가 들어갔었다), 이제 IoU를 넘는 모든 프레임의 각도를 모아 순환평균한다.
+        일반 산술평균은 못 쓴다 — 그리퍼가 대칭이라 각도가 mod 180이라서 179도와
+        1도의 참값은 거의 같은데 산술평균은 90도로 완전히 틀린 값을 낸다. 그래서
+        각도를 2배로 키워 벡터(cos/sin)로 바꿔 평균한 뒤 다시 반으로 되돌리는
+        "double angle" 방식으로 mod-180 순환평균을 낸다.
 
         2026-07-08: depth 샘플링 지점을 bbox 중심 대신 이 마스크 중심으로 쓰면,
         손잡이가 있거나 일부만 보이는 물체처럼 bbox가 실제 물체와 어긋나는
@@ -135,8 +143,8 @@ class YoloModel:
         항상 실제 물체 내부의 점을 얻을 수 있다.
         """
         best_iou = iou_threshold
-        best_angle = None
         best_center = None
+        angles = []
         for res in results:
             if res.masks is None:
                 continue
@@ -147,11 +155,23 @@ class YoloModel:
                 if int(label) != label_id:
                     continue
                 iou = self._iou(box, det_box)
+                if iou <= iou_threshold:
+                    continue
+                angle = self._short_axis_angle_deg(poly)
+                if angle is not None:
+                    angles.append(angle)
                 if iou > best_iou:
                     best_iou = iou
-                    best_angle = self._short_axis_angle_deg(poly)
                     best_center = self._mask_centroid(poly)
-        return best_angle, best_center
+        return self._circular_mean_deg_mod180(angles), best_center
+
+    def _circular_mean_deg_mod180(self, angles_deg):
+        """mod-180 각도들의 순환평균("double angle" 방식)을 낸다. 빈 리스트면 None."""
+        if not angles_deg:
+            return None
+        doubled = np.radians(np.multiply(angles_deg, 2.0))
+        mean_angle = math.degrees(math.atan2(np.sin(doubled).mean(), np.cos(doubled).mean())) / 2.0
+        return mean_angle % 180.0
 
     def _mask_centroid(self, polygon_xy):
         """마스크 폴리곤(픽셀 좌표)의 무게중심 (cx, cy)을 반환한다."""
