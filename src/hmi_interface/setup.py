@@ -44,6 +44,7 @@ setup(
         'console_scripts': [
             'hmi_interface_server = hmi_interface.app:main',
             'hmi_voice_bridge = hmi_interface.voice_bridge:main',
+            'hmi_vision_bridge = hmi_interface.vision_bridge:main',
         ],
     },
 )
