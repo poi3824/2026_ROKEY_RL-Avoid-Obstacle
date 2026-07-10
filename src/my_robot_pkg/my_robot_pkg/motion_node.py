@@ -42,14 +42,14 @@ from robot_interfaces.action import MoveTo, Pick, Place
 from robot_interfaces.msg import SafetyState
 
 from my_robot_pkg.gripper import RG2Gripper
-from my_robot_pkg.motion_executor import MotionExecutor, EmergencyStop
+from my_robot_pkg.motion_executor import MotionExecutor, EmergencyStop, GoalCancelled
 from my_robot_pkg.pick_logger import PickLogger
 
 PACKAGE_PATH = get_package_share_directory("my_robot_pkg")
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
-VELOCITY, ACC = 30, 30
+VELOCITY, ACC = 70, 70
 
 TOOLCHARGER_IP = "192.168.1.1"
 TOOLCHARGER_PORT = "502"
@@ -113,7 +113,18 @@ stop_client = dsr_node.create_client(MoveStop, "motion/move_stop")
 # move_linear()가 amovel + check_motion 폴링 도중 확인하는 플래그.
 # 이제 세팅/해제는 /safety/state 구독 콜백(_on_safety_state)에서 이뤄진다.
 estop_event = threading.Event()
+# 2026-07-09 버그 수정: 시작부터 set — 첫 /safety/state 메시지(RUN)가 실제로
+# 도착해 _on_safety_state가 clear할 때까지는 "안전상태 미확인"으로 보고 보수적으로
+# 막는다. 이전엔 기본이 clear(=RUN 가정)라서, safety_monitor가 이미 ESTOP/PAUSE를
+# 래치한 상태에서 motion_node가 재시작되면 TRANSIENT_LOCAL 구독이 실제 상태를
+# 받기 전까지의 짧은 창(DDS 디스커버리 지연) 동안 안전상태와 무관하게 움직일 수
+# 있었다. _handle_interrupts가 이미 "hold" 로직을 갖고 있어 자연스럽게 막힌다.
+estop_event.set()
 hand_pause_event = threading.Event()
+# 2026-07-09 버그 수정: goal 취소 전용 이벤트 — estop_event에 얹어 쓰면
+# safety_monitor의 RUN 하트비트가 estop_event를 지울 때 취소도 같이 무효화되는
+# 레이스가 있었다(_on_cancel/_check_cancelled 참고).
+cancel_event = threading.Event()
 
 # amovel/movej/mwait/check_motion/stop/get_current_posx 전부 dsr_node(global executor)를
 # spin하므로, 동시 호출을 막기 위해 이 락으로 직렬화한다.
@@ -136,6 +147,13 @@ class MotionNode(Node):
 
         self.declare_parameter("grip_min_width_mm", 30.0)
         grip_min_width = self.get_parameter("grip_min_width_mm").value
+
+        # 2026-07-09 효율화: 캘리브레이션 행렬은 고정값이라 노드 시작 시 한 번만
+        # 로드한다. 이전엔 transform_to_base()가 호출될 때마다(get_surface_z가
+        # pick 한 번에 최대 15회 이상 부르는 get_target_pos/_read_surface_z_once
+        # 경로) 디스크에서 매번 np.load — 순수 낭비였다.
+        gripper2cam_path = os.path.join(PACKAGE_PATH, "resource", "T_gripper2camera.npy")
+        self.gripper2cam = np.load(gripper2cam_path)
 
         self.pick_logger = PickLogger()
 
@@ -192,6 +210,7 @@ class MotionNode(Node):
             # 강조한 부분(세션 간 값이 남아있을 수 있음)을 그대로 지킨다.
             amovej=amovej, get_current_posj=get_current_posj,
             get_current_posx=lambda: get_current_posx(ref=DR_BASE),
+            cancel_event=cancel_event,
         )
 
         # Action servers
@@ -224,8 +243,11 @@ class MotionNode(Node):
             hand_pause_event.clear()
 
     def _on_cancel(self, goal_handle):
-        # 취소 요청도 응급 정지에 준해 처리한다(진행 중 move_linear가 멈추도록).
-        estop_event.set()
+        # 2026-07-09 버그 수정: 취소는 estop_event가 아니라 전용 cancel_event로
+        # 처리한다. estop_event를 같이 쓰면 safety_monitor의 RUN 하트비트(0.5초
+        # 주기)가 estop_event를 지울 때 취소 자체가 무효화돼, 브레인이 취소한
+        # goal이 조용히 원래 목적지로 재개돼버리는 레이스가 있었다.
+        cancel_event.set()
         return CancelResponse.ACCEPT
 
     def _on_goal(self, goal_request):
@@ -247,20 +269,26 @@ class MotionNode(Node):
         with self._goal_lock:
             self._goal_active = False
 
-    def _safe_terminate(self, goal_handle):
-        """未처리 예외로 execute 콜백이 죽을 때 goal을 안전하게 종료 상태로 옮긴다.
+    def _try_transition(self, fn, *args):
+        """goal_handle.succeed()/abort()/canceled() 호출을 안전하게 감싼다.
 
-        succeed()/abort()/canceled()는 goal이 이미 다른 상태(예: 취소 처리 중)면
-        rclpy가 잘못된 상태 전이로 보고 예외를 또 던진다. 여기서 그 예외까지
-        잡아야 브레인의 get_result_async()가 영원히 기다리는 걸 막을 수 있다.
+        goal이 이미 다른 상태(예: 취소 처리 중)면 rclpy가 잘못된 상태 전이로
+        예외를 던진다 — 여기서 잡아야 브레인의 get_result_async()가 영원히
+        기다리는 걸 막을 수 있다. cancel_event/estop_event 레이스가 어떤 식으로
+        남아있어도(2026-07-09 발견) 이 헬퍼가 최후 방어선이 되도록, 모든
+        succeed()/abort()/canceled() 호출은 이걸 거친다.
         """
         try:
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-            elif goal_handle.is_active:
-                goal_handle.abort()
+            fn(*args)
         except Exception as e:
-            self.get_logger().error(f"goal 상태 정리 중 추가 오류(무시): {e}")
+            self.get_logger().error(f"goal 상태 전이 실패(무시): {e}")
+
+    def _safe_terminate(self, goal_handle):
+        """未처리 예외로 execute 콜백이 죽을 때 goal을 안전하게 종료 상태로 옮긴다."""
+        if goal_handle.is_cancel_requested:
+            self._try_transition(goal_handle.canceled)
+        elif goal_handle.is_active:
+            self._try_transition(goal_handle.abort)
 
     # ---- Action 실행 콜백 ----
     # 각 _execute_*는 _goal_active를 반드시 해제해야 하므로(안 그러면 로봇이
@@ -272,6 +300,7 @@ class MotionNode(Node):
             self._release_goal_slot()
 
     def _do_move_to(self, goal_handle):
+        cancel_event.clear()  # 이전 goal의 취소 신호가 새 goal로 새어들지 않도록
         pose = list(goal_handle.request.pose)
         label = goal_handle.request.label
         self.get_logger().info(f"[MoveTo] {label or ''} -> {pose}")
@@ -289,8 +318,13 @@ class MotionNode(Node):
                 self.motion.go_home(pose)
             else:
                 self.motion.move_linear(pose)
+        except GoalCancelled:
+            self._try_transition(goal_handle.canceled)
+            result.success = False
+            result.message = "cancelled"
+            return result
         except EmergencyStop:
-            goal_handle.abort()
+            self._try_transition(goal_handle.abort)
             result.success = False
             result.message = "emergency stop"
             return result
@@ -301,7 +335,7 @@ class MotionNode(Node):
             result.message = f"internal error: {e}"
             return result
 
-        goal_handle.succeed()
+        self._try_transition(goal_handle.succeed)
         result.success = True
         result.message = "done"
         return result
@@ -313,6 +347,7 @@ class MotionNode(Node):
             self._release_goal_slot()
 
     def _do_pick(self, goal_handle):
+        cancel_event.clear()  # 이전 goal의 취소 신호가 새 goal로 새어들지 않도록
         obj = goal_handle.request.object_label
         scan_pose = list(goal_handle.request.scan_pose)
         scan_pose_b = list(goal_handle.request.scan_pose_b)
@@ -335,9 +370,11 @@ class MotionNode(Node):
             if scan_pose_b:
                 found = self.motion.sweep_to_detect(
                     scan_pose, scan_pose_b, lambda: self._check_visible(obj),
+                    start_visibility_cb=lambda: self._start_visibility_check(obj),
+                    poll_visibility_cb=self._poll_visibility_check,
                 )
                 if not found:
-                    goal_handle.abort()
+                    self._try_transition(goal_handle.abort)
                     result.success = False
                     result.picked_pose = []
                     result.message = f"스캔 스윕 실패: {obj}"
@@ -347,7 +384,7 @@ class MotionNode(Node):
 
             source_pos = self.get_target_pos(obj)
             if source_pos is None:
-                goal_handle.abort()
+                self._try_transition(goal_handle.abort)
                 result.success = False
                 result.picked_pose = []
                 result.message = f"detect 실패: {obj}"
@@ -356,8 +393,14 @@ class MotionNode(Node):
             send_feedback("detected", 0)
 
             success = self.motion.pick(source_pos, obj, feedback_cb=send_feedback)
+        except GoalCancelled:
+            self._try_transition(goal_handle.canceled)
+            result.success = False
+            result.picked_pose = []
+            result.message = "cancelled"
+            return result
         except EmergencyStop:
-            goal_handle.abort()
+            self._try_transition(goal_handle.abort)
             result.success = False
             result.picked_pose = []
             result.message = "emergency stop"
@@ -374,9 +417,9 @@ class MotionNode(Node):
         result.picked_pose = source_pos if success else []
         result.message = "gripped" if success else "grip 실패"
         if success:
-            goal_handle.succeed()
+            self._try_transition(goal_handle.succeed)
         else:
-            goal_handle.abort()
+            self._try_transition(goal_handle.abort)
         return result
 
     def _execute_place(self, goal_handle):
@@ -386,6 +429,7 @@ class MotionNode(Node):
             self._release_goal_slot()
 
     def _do_place(self, goal_handle):
+        cancel_event.clear()  # 이전 goal의 취소 신호가 새 goal로 새어들지 않도록
         target_pose = list(goal_handle.request.target_pose)
         self.get_logger().info(f"[Place] target_pose={target_pose}")
 
@@ -403,8 +447,13 @@ class MotionNode(Node):
             # 그리퍼 개방/후퇴까지 마친다(motion_executor.MotionExecutor.place_via_rl()
             # docstring 참고). RL이 목표에 수렴하지 못하면 하강 자체를 시도하지 않는다.
             placed = self.motion.place_via_rl(target_pose, feedback_cb=send_feedback)
+        except GoalCancelled:
+            self._try_transition(goal_handle.canceled)
+            result.success = False
+            result.message = "cancelled"
+            return result
         except EmergencyStop:
-            goal_handle.abort()
+            self._try_transition(goal_handle.abort)
             result.success = False
             result.message = "emergency stop"
             return result
@@ -418,9 +467,9 @@ class MotionNode(Node):
         result.success = bool(placed)
         result.message = "placed" if placed else "RL reach 실패 (목표 미도달)"
         if placed:
-            goal_handle.succeed()
+            self._try_transition(goal_handle.succeed)
         else:
-            goal_handle.abort()
+            self._try_transition(goal_handle.abort)
         return result
 
     # ---- 검출 / 좌표변환 (robot_action_node에서 이관) ----
@@ -434,14 +483,41 @@ class MotionNode(Node):
         return future.result()
 
     def _check_visible(self, label):
-        """스캔 스윕 중 반복 호출되는 가벼운 단일 프레임 가시성 체크(/check_visibility).
+        """가벼운 단일 프레임 가시성 체크(/check_visibility)를 동기로 호출한다.
 
-        get_target_pos(8프레임 융합, ~1초)와 달리 프레임 1장만 보는 빠른 경로라
-        sweep_to_detect의 폴링 루프 안에서 반복 호출해도 부담이 적다.
+        로봇이 이미 멈춰 있는 시점(스윕 시작 전 pose_a, 스윕 종료 후 pose_b)에서만
+        쓴다 — 그 사이엔 인터럽트 반응성을 지킬 모션 폴링 루프가 없으므로 블로킹
+        호출이어도 안전하다. 스윕 이동 도중 반복 체크는 아래 논블로킹 쌍
+        (_start_visibility_check/_poll_visibility_check)을 대신 쓴다.
         """
         self.check_visibility_request.target = label
         future = self.check_visibility_client.call_async(self.check_visibility_request)
         result = self._wait_for(future, timeout_sec=CHECK_VISIBILITY_TIMEOUT)
+        return bool(result is not None and result.visible)
+
+    def _start_visibility_check(self, label):
+        """/check_visibility 요청을 큐잉만 하고 바로 리턴한다(논블로킹).
+
+        2026-07-09 버그 수정: 이전엔 sweep_to_detect의 모션 폴링 루프 안에서
+        _check_visible()을 동기 호출했는데, 이 호출이 CHECK_VISIBILITY_TIMEOUT
+        (최대 2초)까지 블로킹되는 동안 같은 루프의 _handle_interrupts()가 전혀
+        안 돌아서 손 감지/응급정지 반응이 그만큼 지연됐다. 이제 스윕 이동 중에는
+        요청만 큐잉해두고, 아래 _poll_visibility_check()로 매 폴링 주기(0.05초)마다
+        완료 여부만 논블로킹으로 확인한다.
+        """
+        self.check_visibility_request.target = label
+        self._visibility_future = self.check_visibility_client.call_async(self.check_visibility_request)
+
+    def _poll_visibility_check(self):
+        """진행 중인 /check_visibility 요청이 끝났으면 bool을, 아직이면 None을 반환한다.
+
+        요청이 없으면(아직 _start_visibility_check를 안 불렀으면) None을 반환한다.
+        """
+        future = getattr(self, "_visibility_future", None)
+        if future is None or not future.done():
+            return None
+        self._visibility_future = None
+        result = future.result()
         return bool(result is not None and result.visible)
 
     def get_target_pos(self, label):
@@ -459,12 +535,15 @@ class MotionNode(Node):
             self.get_logger().warn(f"No detection for '{label}'")
             return None
 
-        gripper2cam_path = os.path.join(PACKAGE_PATH, "resource", "T_gripper2camera.npy")
         with dsr_lock:  # get_current_posx도 dsr_node를 spin하므로 직렬화
             robot_posx = get_current_posx()[0]
-        base_coords = self.transform_to_base(camera_coords, gripper2cam_path, robot_posx)
+        base_coords = self.transform_to_base(camera_coords, robot_posx)
 
-        if base_coords[2] and sum(base_coords) != 0:
+        # 2026-07-09 버그 수정: 이전엔 `base_coords[2] and ...`로 z값 자체의
+        # truthy를 같이 검사해, z가 정확히 0.0인(드물지만 유효할 수 있는) 케이스에서
+        # DEPTH_OFFSET/MIN_DEPTH 안전 클램프가 조용히 생략됐다. "변환 결과가
+        # 전부 0인 퇴화 케이스"만 걸러내면 되므로 sum(base_coords) != 0만 본다.
+        if sum(base_coords) != 0:
             base_coords[2] += DEPTH_OFFSET
             base_coords[2] = max(base_coords[2], MIN_DEPTH)
 
@@ -501,21 +580,19 @@ class MotionNode(Node):
         if sum(camera_coords) == 0:
             return None
 
-        gripper2cam_path = os.path.join(PACKAGE_PATH, "resource", "T_gripper2camera.npy")
         with dsr_lock:
             robot_posx = get_current_posx()[0]
-        base_coords = self.transform_to_base(camera_coords, gripper2cam_path, robot_posx)
+        base_coords = self.transform_to_base(camera_coords, robot_posx)
         return base_coords[2]
 
-    def transform_to_base(self, camera_coords, gripper2cam_path, robot_pos):
+    def transform_to_base(self, camera_coords, robot_pos):
         """카메라 좌표계 3D 좌표를 로봇 베이스 좌표계로 변환한다."""
-        gripper2cam = np.load(gripper2cam_path)
         coord = np.append(np.array(camera_coords), 1)
 
         x, y, z, rx, ry, rz = robot_pos
         base2gripper = self.get_robot_pose_matrix(x, y, z, rx, ry, rz)
 
-        base2cam = base2gripper @ gripper2cam
+        base2cam = base2gripper @ self.gripper2cam
         td_coord = np.dot(base2cam, coord)
 
         return td_coord[:3]

@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hmi_interface</name>
+  <version>0.0.0</version>
+  <description>Flask 기반 통합 HMI - STT/TTS, Vision, RL(장애물회피), 파라미터, DB(pick_log), 로봇 제어 설정 탭을 한 화면에 모은 관제 UI. hmi_bridge(월드맵 3D 뷰어)와는 별개 패키지 - 서로 건드리지 않는다.</description>
+  <maintainer email="poi3824@gmail.com">soo</maintainer>
+  <license>TODO: License declaration</license>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
