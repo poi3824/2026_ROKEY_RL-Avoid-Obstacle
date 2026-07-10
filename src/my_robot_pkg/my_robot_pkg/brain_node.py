@@ -241,10 +241,7 @@ class BrainNode(Node):
                     self._say("정지했습니다")
                     return
             else:
-                # 2026-07-10: Place가 지금은 RL로 target 상단까지만 옮기고 끝난다(실제
-                # 배치는 아직 미구현) — motion_node._do_place 참고. 그리퍼가 열리기 전까지는
-                # "놓았습니다"라고 안내하지 않는다.
-                self._say("목표 위치 상단에 도착했습니다")
+                self._say("놓았습니다")
 
         self._send_move_to(POSITION_COORDS["home"], "home")
         self._say("작업을 완료했습니다")

@@ -477,15 +477,22 @@ class MotionExecutor:
 
         self.move_linear(new_posx)
 
-    def move_to_place_hover(self, target_pos, feedback_cb=None):
+    def place_via_rl(self, target_pos, feedback_cb=None):
         """pick 직후 hover 자세에서 RL 정책으로 target_pos 상단까지 옮기고, 도착
-        지점에서 orientation을 target_pos의 배치 각도로 재정렬한다(2026-07-10).
+        지점에서 orientation을 재정렬한 뒤, depth 기반으로 실제 내려놓기까지
+        마친다(2026-07-10, move_to_place_hover에서 확장).
 
-        RL 통합 첫 단계 — 실제 하강/그리퍼 개방("place")은 이번 단계에 포함하지
-        않는다. RL 이동 자체의 신뢰성부터 실기에서 검증한 뒤 이어붙인다.
+        RL 이동(move_via_rl) + 정렬(_align_tcp_vertical)까지는 TCP 위치/자세만
+        맞추는 접근 단계이고, 그 뒤 하강/그리퍼 개방/후퇴는 기존 place()의 depth
+        기반 로직을 그대로 재사용한다 — target_pos에 박힌 z값이 아니라
+        get_surface_z()로 그 순간 실측한 표면 높이를 기준으로 내려가므로, hover
+        접근 높이(PLACE_HOVER_HEIGHT)를 얼마로 잡든 실제 배치 높이 자체는
+        안전하다.
 
         Returns:
-            bool: RL이 목표에 수렴하면 True(정렬까지 완료), 못 하면 False(정렬은 생략).
+            bool: RL이 목표에 수렴 못 하면 False(정렬/하강/배치 전부 생략).
+            그 외에는 True(하강 depth를 못 읽어도 target_pos로 fallback해서
+            끝까지는 진행한다 — 기존 place()와 동일한 정책).
         """
         hover_pos = target_pos[:2] + [target_pos[2] + PLACE_HOVER_HEIGHT] + target_pos[3:]
 
@@ -497,6 +504,24 @@ class MotionExecutor:
         if feedback_cb:
             feedback_cb("aligning")
         self._align_tcp_vertical(target_pos[3:6])
+
+        if feedback_cb:
+            feedback_cb("descending")
+
+        surface_z = self.get_surface_z() if self.get_surface_z else None
+        if surface_z is not None:
+            down_pos = target_pos[:2] + [surface_z + PLACE_CLEARANCE] + target_pos[3:]
+        else:
+            down_pos = target_pos
+            print("[MotionExecutor] Depth를 못 읽어서 target_pos 그대로 내려감")
+
+        self.move_linear(down_pos)
+
+        if feedback_cb:
+            feedback_cb("releasing")
+        self.gripper.open_gripper()
+        self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
+        self.move_linear(target_pos)
         return True
 
     def apply_avoidance_cmd(self, cmd):

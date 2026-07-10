@@ -399,11 +399,10 @@ class MotionNode(Node):
 
         result = Place.Result()
         try:
-            # 2026-07-10: RL 통합 첫 단계 — target 상단까지는 RL 정책으로 옮기고,
-            # 도착 지점에서 orientation만 재정렬한 뒤 끝난다. 실제 하강/그리퍼
-            # 개방("배치")은 RL 이동 자체의 신뢰성을 실기에서 검증한 뒤 이어붙인다
-            # (motion_executor.MotionExecutor.move_to_place_hover() docstring 참고).
-            reached = self.motion.move_to_place_hover(target_pose, feedback_cb=send_feedback)
+            # 2026-07-10: RL로 target 상단까지 이동 + 정렬한 뒤, depth 기반 하강/
+            # 그리퍼 개방/후퇴까지 마친다(motion_executor.MotionExecutor.place_via_rl()
+            # docstring 참고). RL이 목표에 수렴하지 못하면 하강 자체를 시도하지 않는다.
+            placed = self.motion.place_via_rl(target_pose, feedback_cb=send_feedback)
         except EmergencyStop:
             goal_handle.abort()
             result.success = False
@@ -416,9 +415,9 @@ class MotionNode(Node):
             result.message = f"internal error: {e}"
             return result
 
-        result.success = bool(reached)
-        result.message = "target 상단 도달 (RL), 정렬 완료" if reached else "RL reach 실패 (목표 미도달)"
-        if reached:
+        result.success = bool(placed)
+        result.message = "placed" if placed else "RL reach 실패 (목표 미도달)"
+        if placed:
             goal_handle.succeed()
         else:
             goal_handle.abort()
