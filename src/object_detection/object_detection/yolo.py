@@ -64,7 +64,7 @@ class YoloModel:
         print("%d frames captured", len(frames))
         return list(frames.values())
 
-    def has_label(self, frame, target, confidence_threshold=0.6):
+    def has_label(self, frame, target, confidence_threshold=0.9):
         """단일 프레임 1장만으로 target 라벨이 있는지 빠르게 확인한다 (True/False).
 
         2026-07-07: hand 안전 감지용. get_best_detection은 pick 신뢰도를 위해
