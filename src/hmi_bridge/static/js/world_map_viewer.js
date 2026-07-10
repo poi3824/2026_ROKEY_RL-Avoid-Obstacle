@@ -200,7 +200,8 @@ refreshBtn.addEventListener("click", async () => {
 });
 
 (async function init() {
-  const initial = await refreshScanList(null);
+  const requestedScan = new URLSearchParams(window.location.search).get("scan");
+  const initial = await refreshScanList(requestedScan);
   if (initial) await loadScan(initial);
 })();
 

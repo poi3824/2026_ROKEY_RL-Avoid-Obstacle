@@ -15,6 +15,8 @@ import os
 from flask import Flask, jsonify, render_template, request
 
 from hmi_interface import pick_log_reader as pl
+from hmi_interface import voice_log_reader as vl
+from hmi_interface import worldmap_catalog_reader as wc
 
 
 def create_app():
@@ -38,6 +40,18 @@ def create_app():
     def api_db_pick_attempts():
         limit = request.args.get("limit", default=50, type=int)
         return jsonify({"rows": pl.fetch_recent_attempts(limit=limit)})
+
+    # ---- DB 탭 "STT" 서브탭 - voice_logger.py가 쓰는 DB를 읽기 전용으로 조회 ----
+    @app.route("/api/db/voice_events")
+    def api_db_voice_events():
+        limit = request.args.get("limit", default=50, type=int)
+        return jsonify({"rows": vl.fetch_recent_events(limit=limit)})
+
+    # ---- DB 탭 "월드" 서브탭 - DB가 아니라 data/world_maps/ 디렉토리를 직접 나열 ----
+    @app.route("/api/db/worldmap_scans")
+    def api_db_worldmap_scans():
+        limit = request.args.get("limit", default=30, type=int)
+        return jsonify({"rows": wc.fetch_recent_scans(limit=limit)})
 
     # ---- 로봇 제어 설정 탭 - 아직 stub. TODO 참고 ----
     @app.route("/api/robot_control", methods=["POST"])
