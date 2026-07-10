@@ -4,9 +4,13 @@
 import logging
 
 from flask import Flask
+from flask_cors import CORS
 from flask_socketio import SocketIO
 
+from api.db import db_bp
 from api.health import health_bp
+from api.robot_control import robot_control_bp
+from api.worldmap import worldmap_bp
 from config import Config
 from sockets.browser_ns import BrowserNamespace
 from sockets.ros_ns import RosNamespace
@@ -18,6 +22,9 @@ logging.basicConfig(level=logging.INFO)
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+    # 개발 단계에서 React(Vite, :5173)와 Flask(:5100)가 서로 다른 origin이라 필요.
+    # 프로덕션에서는 Flask가 React 빌드 결과물을 같은 origin으로 서빙하므로 불필요해진다.
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
 
     state = HmiState(
         dedup_ttl_sec=Config.COMMAND_DEDUP_TTL_SEC,
@@ -26,6 +33,9 @@ def create_app():
     app.config["ROS_NAMESPACE_STATE"] = state
 
     app.register_blueprint(health_bp)
+    app.register_blueprint(db_bp)
+    app.register_blueprint(worldmap_bp)
+    app.register_blueprint(robot_control_bp)
 
     # async_mode="threading": 이 프로세스는 rclpy를 안 쓰지만, eventlet의
     # monkey-patch가 sqlite3 리더 모듈 등과 얽히는 걸 피하려고 가장 단순한

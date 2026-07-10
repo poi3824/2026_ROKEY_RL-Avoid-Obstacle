@@ -45,22 +45,6 @@ export const MOCK_VOICE_LOGS = [
 
 export const MOCK_BRIDGE_CONNECTED = false;
 
-export const MOCK_PICK_ATTEMPTS = [
-  { id: 12, ts: Date.now() / 1000 - 120, obj_label: "obj_A", attempt_no: 1, gripper_width_mm: 42.3, success: 1 },
-  { id: 11, ts: Date.now() / 1000 - 400, obj_label: "obj_B", attempt_no: 2, gripper_width_mm: 38.1, success: 0 },
-];
-
-export const MOCK_VOICE_EVENTS = [
-  { id: 30, ts: Date.now() / 1000 - 10, kind: "stt", text: "빨간색 통을 1번 위치로 옮겨" },
-  { id: 29, ts: Date.now() / 1000 - 15, kind: "command", text: "obj_A -> target1" },
-];
-
-export const MOCK_WORLDMAP_SCANS = [
-  { scan_id: "world_map_update_20260708_182250", timestamp: "2026-07-08 18:22:50", cluster_count: 3 },
-];
-
-export const MOCK_PERFORMANCE_SUMMARY = {
-  total: 18,
-  success: 14,
-  success_rate: 77.8,
-};
+// pick_attempts/voice_events/worldmap_scans/performance summary는 Phase 2부터
+// hmi/frontend/src/hooks/useDbData.js가 실제 hmi/backend REST API에서 가져온다 -
+// 더 이상 mock이 필요 없어 여기서 제거했다.

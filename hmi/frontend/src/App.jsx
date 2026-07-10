@@ -10,16 +10,18 @@ import PerformancePage from "./components/pages/PerformancePage";
 import SettingsPage from "./components/pages/SettingsPage";
 import {
   MOCK_SAFETY_STATUS, MOCK_TASK_STATUS, MOCK_VOICE_STATUS, MOCK_VOICE_LOGS,
-  MOCK_BRIDGE_CONNECTED, MOCK_PICK_ATTEMPTS, MOCK_VOICE_EVENTS, MOCK_WORLDMAP_SCANS,
-  MOCK_PERFORMANCE_SUMMARY,
+  MOCK_BRIDGE_CONNECTED,
 } from "./mock/data";
+import { useDbData } from "./hooks/useDbData";
 
-// Phase 1: 전부 mock 데이터 - 실제 REST(Phase 2)/Socket.IO(Phase 3/5) 연결은 다음
-// Phase에서 이 컴포넌트들의 props를 채우는 훅으로 교체한다(컴포넌트 자체는 안 바뀜).
+// Phase 1: SafetyStatus/TaskProgress/VoiceConsole은 아직 mock (Phase 3/5에서 Socket.IO로 교체).
+// Phase 2: DatabasePage/PerformancePage는 useDbData()로 실제 REST API(hmi/backend)에 연결됨 -
+// 기존 hmi_interface(:5050)/hmi_bridge(:5000)는 계속 별도로 병행 운영 중.
 export default function App() {
   const [activeId, setActiveId] = useState("dashboard");
   const [selectedScanId, setSelectedScanId] = useState(null);
   const [yoloEnabled, setYoloEnabled] = useState(false);
+  const db = useDbData();
 
   return (
     <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={MOCK_BRIDGE_CONNECTED}>
@@ -45,15 +47,18 @@ export default function App() {
       {activeId === "viewer3d" && <RobotViewer scanId={selectedScanId} />}
 
       {activeId === "database" && (
-        <DatabasePage
-          pickAttempts={MOCK_PICK_ATTEMPTS}
-          voiceEvents={MOCK_VOICE_EVENTS}
-          worldmapScans={MOCK_WORLDMAP_SCANS}
-          onSelectScan={(id) => { setSelectedScanId(id); setActiveId("viewer3d"); }}
-        />
+        <div>
+          {db.error ? <div className="note">API 연결 실패: {db.error} (hmi/backend가 떠 있는지, VITE_API_BASE가 맞는지 확인)</div> : null}
+          <DatabasePage
+            pickAttempts={db.pickAttempts}
+            voiceEvents={db.voiceEvents}
+            worldmapScans={db.worldmapScans}
+            onSelectScan={(id) => { setSelectedScanId(id); setActiveId("viewer3d"); }}
+          />
+        </div>
       )}
 
-      {activeId === "performance" && <PerformancePage summary={MOCK_PERFORMANCE_SUMMARY} />}
+      {activeId === "performance" && <PerformancePage summary={db.summary} />}
 
       {activeId === "settings" && <SettingsPage />}
     </AppShell>
