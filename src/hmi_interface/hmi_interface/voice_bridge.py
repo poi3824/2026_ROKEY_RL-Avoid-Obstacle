@@ -15,6 +15,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Float32
 from std_srvs.srv import SetBool
+from rcl_interfaces.msg import Log
 
 import websockets
 
@@ -23,6 +24,21 @@ VOICE_LEVEL_TOPIC = "/voice/level"
 VOICE_MANUAL_RECORD_SERVICE = "/voice/manual_record"
 WS_HOST = "0.0.0.0"
 WS_PORT = 8765
+
+# get_keyword_node의 self.get_logger()가 이미 찍는 로그를 그대로 HMI로 보여준다
+# (새 토픽/코드 추가 없이 재활용) - 모든 노드 로그가 /rosout(rcl_interfaces/msg/Log)에
+# 모이므로 여기서 이름으로 필터링만 한다.
+ROSOUT_TOPIC = "/rosout"
+LOG_SOURCE_NODE = "get_keyword_node"
+_LOG_LEVEL_NAMES = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "FATAL"}
+
+
+def _log_level_to_int(level):
+    """rcl_interfaces/msg/Log.level은 이 rclpy 빌드에서 1바이트 bytes로 온다
+    (예: Log.INFO == b'\\x14') - int로 정규화한다."""
+    if isinstance(level, (bytes, bytearray)):
+        return int.from_bytes(level, "little")
+    return int(level)
 
 
 class VoiceBridge(Node):
@@ -41,6 +57,12 @@ class VoiceBridge(Node):
 
         self.create_subscription(String, VOICE_STATE_TOPIC, self._on_state, 10)
         self.create_subscription(Float32, VOICE_LEVEL_TOPIC, self._on_level, 10)
+        # 2026-07-10: /rosout 구독 - get_keyword_node 로그를 STT-TTS 탭 로그
+        # 블록에 그대로 흘려보낸다. /rosout은 TRANSIENT_LOCAL(과거분 재생)이지만
+        # 여기선 기본(VOLATILE) 구독으로 충분하다 - 그 시점부터의 실시간 로그만
+        # 필요하고, DDS QoS 규칙상 VOLATILE 구독자는 TRANSIENT_LOCAL 발행자와도
+        # 호환된다(과거분만 못 받을 뿐).
+        self.create_subscription(Log, ROSOUT_TOPIC, self._on_rosout, 50)
 
         # 2026-07-10: HMI 수동 녹음 토글 버튼 - 브라우저 -> 이 노드(websocket
         # 수신) -> get_keyword_node(서비스 호출) 방향. Flask는 여전히 이 경로에
@@ -59,14 +81,21 @@ class VoiceBridge(Node):
 
     def _on_state(self, msg):
         self._state = msg.data
-        self._broadcast()
+        self._broadcast({"state": self._state, "level": self._level})
 
     def _on_level(self, msg):
         self._level = round(float(msg.data), 4)
-        self._broadcast()
+        self._broadcast({"state": self._state, "level": self._level})
 
-    def _broadcast(self):
-        payload = json.dumps({"state": self._state, "level": self._level})
+    def _on_rosout(self, msg):
+        if msg.name != LOG_SOURCE_NODE:
+            return
+        stamp = msg.stamp.sec + msg.stamp.nanosec / 1e9
+        level_name = _LOG_LEVEL_NAMES.get(_log_level_to_int(msg.level), "INFO")
+        self._broadcast({"log": {"level": level_name, "text": msg.msg, "stamp": stamp}})
+
+    def _broadcast(self, payload_dict):
+        payload = json.dumps(payload_dict)
         # rclpy 콜백은 ROS spin 스레드에서 도는데, websocket 전송은 asyncio
         # 이벤트루프(별도 스레드) 소관이라 스레드 안전하게 넘겨준다.
         asyncio.run_coroutine_threadsafe(_send_all(self._ws_clients, payload), self._loop)
