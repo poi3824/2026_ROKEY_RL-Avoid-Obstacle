@@ -25,6 +25,15 @@
 # 액션 서버를 기다림). world_map_node/rl_avoidance_node는 서로/brain_node를 기다리지
 # 않고 각자 독립적으로 뜬다 — world_map_node는 update_world_map 서비스가 호출될 때만
 # 실제로 MoveLine을 사용한다.
+#
+# 2026-07-10: output="both" — 화면에 그대로 찍히면서(screen) 동시에 launch.log 파일에도
+# 저장된다(log). 예전엔 "screen"만 써서 print()/get_logger() 출력이 터미널에만 나가고
+# 디스크엔 launch.log(프로세스 시작/종료 이벤트)만 남아, 지나간 세션의 pick/place 동작
+# 로그를 나중에 다시 볼 방법이 없었다. 트리비얼 노드로 직접 검증 완료 — 노드별 별도
+# 파일이 아니라 ~/.ros/log/<세션>/launch.log 하나에 모든 노드 출력이 터미널에서 보던
+# "[node_name-N] ..." 형식 그대로 같이 쌓인다. 노드별로 나눠 보려면 grep "\[motion_node"
+# 처럼 prefix로 걸러서 보면 된다(노드별 완전히 분리된 파일이 필요하면 own_log가 포함된
+# output="full"로 바꿔야 하지만, 그러면 파일이 더 늘어난다).
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -43,32 +52,32 @@ def generate_launch_description():
 
     object_detection_node = Node(
         package="object_detection", executable="object_detection_node",
-        name="object_detection_node", output="screen",
+        name="object_detection_node", output="both",
     )
     get_keyword_node = Node(
         package="voice_interface", executable="get_keyword_node",
-        name="get_keyword_node", output="screen",
+        name="get_keyword_node", output="both",
     )
     safety_monitor_node = Node(
         package="safety_monitor", executable="safety_monitor_node",
-        name="safety_monitor_node", output="screen",
+        name="safety_monitor_node", output="both",
     )
     motion_node = Node(
         package="my_robot_pkg", executable="motion_node",
-        name="motion_node", output="screen",
+        name="motion_node", output="both",
         parameters=[{"grip_min_width_mm": grip_min_width}],
     )
     brain_node = Node(
         package="my_robot_pkg", executable="brain_node",
-        name="brain_node", output="screen",
+        name="brain_node", output="both",
     )
     world_map_node = Node(
         package="pointcloud_perception", executable="world_map_node",
-        name="world_map_node", output="screen",
+        name="world_map_node", output="both",
     )
     rl_avoidance_node = Node(
         package="obstacle_avoidance", executable="rl_avoidance_node",
-        name="rl_avoidance_node", output="screen",
+        name="rl_avoidance_node", output="both",
     )
 
     return LaunchDescription(args + [

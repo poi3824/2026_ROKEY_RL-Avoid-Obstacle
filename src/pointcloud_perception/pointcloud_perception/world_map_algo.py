@@ -129,6 +129,16 @@ CONFIDENCE_NUM_POINTS_SCALE = 1500.0
 ENABLE_TOPVIEW_DEBUG_PNG = True
 ENABLE_HOUGH_VALIDATION = True
 
+# 2026-07-10: 서로 거의 맞닿은(수 mm 이내) 원기둥 2개를 DBSCAN이 하나의 클러스터로
+# 합쳐버리는 경우가 실기에서 확인됨(eps 기반 클러스터링은 점이 실제로 연결돼 있으면
+# 원리적으로 못 나눈다). Hough 원 검출(아래)은 점 연결성이 아니라 rasterize된
+# height image의 원형 edge 패턴을 보므로, 같은 상황에서도 원기둥 2개를 따로
+# 검출해낸다(circle_fit_vs_hough_overlay.png로 실측 확인) - cluster_points()가
+# 이 정보를 병합 클러스터 분리에 실제로 쓰도록 한다. 기존에는 Hough 결과가
+# save_debug_visualizations()의 교차검증 PNG에만 쓰이고 실제 장애물 목록에는
+# 반영되지 않았다.
+ENABLE_HOUGH_CLUSTER_SPLIT = True
+
 # Hough 검증은 cluster_points()가 이미 걸러낸 점이 아니라, 필터링 전 raw
 # point cloud를 그대로 이미지화한다 - 그래야 서로 다른 두 경로가 같은 답에
 # 도달하는지 보는 교차검증이 된다 (world_map_algo.cluster_points 참고).
@@ -1026,6 +1036,39 @@ def compute_cluster_params(
     }
 
 
+def split_cluster_by_hough_circles(member_points, hough_circles, match_margin_m=HOUGH_MATCH_MAX_DIST_M):
+    """member_points(DBSCAN 클러스터 하나)를 감싸는 hough_circles 중심이 2개 이상이면,
+    각 점을 가장 가까운 원 중심 기준으로 나눠 서브그룹 리스트로 쪼갠다.
+
+    이 클러스터의 XY 반경(중심에서 95퍼센타일 거리) + match_margin_m 안에 중심이
+    들어오는 hough 원만 후보로 본다 - 너무 멀리 있는(다른 물체에 속하는) hough 원이
+    잘못 끼어드는 걸 막는다. 후보가 1개 이하면 안 쪼개고 원본을 그대로
+    [member_points] 형태로 반환한다(정상적으로 하나인 클러스터를 건드리지 않기 위함).
+
+    2026-07-10: 서로 거의 맞닿은 원기둥 2개가 DBSCAN에서 하나로 합쳐지는 문제
+    (ENABLE_HOUGH_CLUSTER_SPLIT 주석 참고)를 고치기 위해 추가.
+    """
+    if not hough_circles:
+        return [member_points]
+
+    x, y = member_points[:, 0], member_points[:, 1]
+    cx_cluster, cy_cluster = float(np.median(x)), float(np.median(y))
+    cluster_extent = float(np.percentile(np.sqrt((x - cx_cluster) ** 2 + (y - cy_cluster) ** 2), 95))
+
+    candidate_centers = [
+        h["center"] for h in hough_circles
+        if math.hypot(h["center"][0] - cx_cluster, h["center"][1] - cy_cluster) <= cluster_extent + match_margin_m
+    ]
+    if len(candidate_centers) < 2:
+        return [member_points]
+
+    centers = np.asarray(candidate_centers)  # (K, 2)
+    dists = np.linalg.norm(member_points[:, None, :2] - centers[None, :, :], axis=2)  # (N, K)
+    assignment = np.argmin(dists, axis=1)
+
+    return [member_points[assignment == k] for k in range(len(candidate_centers)) if np.any(assignment == k)]
+
+
 def get_candidate_points(
     points_xyz,
     ground_z=None,
@@ -1054,14 +1097,21 @@ def cluster_points(
     safety_height_margin=SAFETY_HEIGHT_MARGIN_M,
     outlier_nb_neighbors=OBSTACLE_OUTLIER_NB_NEIGHBORS,
     outlier_std_ratio=OBSTACLE_OUTLIER_STD_RATIO,
+    split_merged_with_hough=ENABLE_HOUGH_CLUSTER_SPLIT,
 ):
     """merged_points -> (바닥 제거 -> flying pixel 제거 -> DBSCAN -> 작은 파편 제거 ->
-    cylinder 파라미터 추정).
+    [Hough 기반 병합 클러스터 분리] -> cylinder 파라미터 추정).
 
     world_map_node가 /world_map/obstacles로 publish할 최종 장애물 목록을 만드는
     진입점. ground_z를 안 주면 바닥 제거를 생략하고 z_min/z_max로만 height를 계산한다
     (레거시 호출부 호환 - 다만 이 경우 테이블에 맞닿은 장애물이 테이블과 한 클러스터로
     뭉칠 수 있다는 점을 알고 있어야 한다. handle_update()는 항상 ground_z를 넘긴다).
+
+    2026-07-10: split_merged_with_hough가 True면(기본값, ENABLE_HOUGH_CLUSTER_SPLIT
+    주석 참고), 각 DBSCAN 클러스터를 Hough 원 검출 결과와 대조해서 서로 거의 맞닿은
+    원기둥 2개가 하나로 뭉친 경우를 서브그룹으로 나눈다. Hough 검출 자체가 실패해도
+    (cv2 없음, 이미지화 실패 등) 예외 없이 분리 없는 기존 DBSCAN 결과로 폴백한다 -
+    이 기능이 죽어도 기존 장애물 추출 자체는 항상 응답해야 하기 때문이다.
 
     반환: [{"id", "centroid": [x,y,z], "radius", "height", "z_min", "z_max",
     "safety_radius", "safety_height", "shape_type", "num_points", "confidence"}, ...]
@@ -1075,16 +1125,40 @@ def cluster_points(
 
     labels = dbscan_labels(candidate_points, eps, min_points)
 
-    clusters = []
+    raw_groups = []
     for label in sorted(set(labels.tolist())):
         if label < 0:
             continue  # noise
         member_points = candidate_points[labels == label]
         if member_points.shape[0] < min_cluster_points:
             continue
-        clusters.append(compute_cluster_params(
-            member_points, label, ground_z, safety_radius_margin, safety_height_margin
-        ))
+        raw_groups.append(member_points)
+
+    hough_circles = []
+    if split_merged_with_hough and CV2_AVAILABLE and raw_groups:
+        try:
+            # save_debug_visualizations()와 동일하게 필터링 전 raw points_xyz를 그대로
+            # 이미지화한다(모듈 상단 HOUGH_RESOLUTION_M 주석 참고 - 이미 검증된 경로와
+            # 동일한 입력을 써야 여기서도 같은 결과를 신뢰할 수 있다).
+            _, _, blurred, x_min, y_min = build_height_image(points_xyz, ground_z)
+            hough_circles = detect_circles_hough(blurred, HOUGH_RESOLUTION_M, x_min, y_min)
+        except Exception:
+            hough_circles = []  # Hough 실패는 분리를 포기할 뿐, DBSCAN 결과 자체는 그대로 응답한다
+
+    clusters = []
+    next_id = 0
+    for member_points in raw_groups:
+        sub_groups = (
+            split_cluster_by_hough_circles(member_points, hough_circles)
+            if hough_circles else [member_points]
+        )
+        for sub_points in sub_groups:
+            if sub_points.shape[0] < min_cluster_points:
+                continue
+            clusters.append(compute_cluster_params(
+                sub_points, next_id, ground_z, safety_radius_margin, safety_height_margin
+            ))
+            next_id += 1
 
     return clusters
 

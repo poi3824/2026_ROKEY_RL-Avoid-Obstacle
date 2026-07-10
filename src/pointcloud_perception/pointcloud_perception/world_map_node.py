@@ -72,8 +72,8 @@ POINTCLOUD_TOPIC = "/camera/camera/depth/color/points"
 MOVE_LINE_SERVICE = "/dsr01/motion/move_line"
 TARGET_FRAME = "base_link"
 
-VEL = [60.0, 30.0]
-ACC = [60.0, 30.0]
+VEL = [60.0, 60.0]
+ACC = [60.0, 60.0]
 
 # Doosan MoveLine의 sync_type 의미는 설치된 dsr_msgs2/컨트롤러 버전에 따라 확인 필요.
 # 기존 코드와 동일하게 0을 기본값으로 둔다. 만약 서비스가 "명령 접수 즉시 반환"이면
