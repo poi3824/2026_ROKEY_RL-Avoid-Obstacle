@@ -31,13 +31,31 @@ HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8766
 JPEG_QUALITY = 70  # 0~100. 화질보다 지연시간/대역폭을 우선한다(모니터링 용도라 충분).
 STREAM_FPS_CAP = 20  # 프레임 재인코딩 부하를 줄이기 위한 상한 - 카메라 실제 fps와 무관.
-BOX_COLOR = (0, 220, 0)
 MASK_FILL_ALPHA = 0.35
 # 2026-07-10: ultralytics 기본 conf 임계값(0.25)을 그대로 쓰면 이 프로젝트의
 # 실제 탐지 기준(object_detection.yolo의 is_fully_visible=0.6, has_label=0.9 등)
 # 보다 훨씬 낮아서, 확신도 낮은 잡음 박스가 화면에 잔뜩 그려져 "임의로 만든 것
 # 처럼" 보였다(실기 확인). 프로젝트 전반의 "진짜 탐지" 기준에 맞춘다.
 YOLO_CONFIDENCE_THRESHOLD = 0.6
+
+# 2026-07-10: 클래스별 색상(BGR, cv2 기준). class_name_tool.json의 실제 클래스
+# 5개(obj_A/obj_B/obj_C/hand/obstacle)에 맞춘다 - robot_get_keyword_node.py의
+# LLM 프롬프트가 obj_A=빨간색 통/obj_B=파란색 통/obj_C=초록색 통으로 매핑해두고
+# 있어서, 그 색 그대로 쓰면 오퍼레이터가 직관적으로 알아볼 수 있다. hand/obstacle은
+# 안전 관련이라 눈에 확 띄는 색(노랑/마젠타)으로 따로 뺀다. 목록에 없는 클래스가
+# 나오면(모델 교체 등) DEFAULT_CLASS_COLOR로 폴백한다.
+CLASS_COLORS = {
+    "obj_A": (40, 40, 220),    # 빨강
+    "obj_B": (220, 120, 30),   # 파랑
+    "obj_C": (60, 180, 60),    # 초록
+    "hand": (0, 210, 255),     # 노랑/주황 - 안전 주의
+    "obstacle": (200, 40, 200),  # 마젠타 - 안전 주의
+}
+DEFAULT_CLASS_COLOR = (170, 170, 170)  # 목록에 없는 클래스용 회색 폴백
+
+
+def _color_for(name):
+    return CLASS_COLORS.get(name, DEFAULT_CLASS_COLOR)
 
 
 class VisionBridge(Node):
@@ -121,20 +139,21 @@ class VisionBridge(Node):
                     continue
                 x1, y1, x2, y2 = map(int, box)
                 name = names.get(int(label), str(int(label)))
+                color = _color_for(name)
 
                 if polys is not None and i < len(polys) and len(polys[i]) > 0:
                     pts = polys[i].astype(np.int32)
-                    cv2.fillPoly(overlay, [pts], BOX_COLOR)
-                    cv2.polylines(annotated, [pts], True, BOX_COLOR, 2)
+                    cv2.fillPoly(overlay, [pts], color)
+                    cv2.polylines(annotated, [pts], True, color, 2)
                     drew_mask = True
                 else:
                     # detect 전용 모델이거나 이 박스만 마스크가 안 잡힌 경우 폴백.
-                    cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, 2)
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
                 label_text = f"{name} {score:.2f}"
                 cv2.putText(
                     annotated, label_text, (x1, max(12, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, BOX_COLOR, 1, cv2.LINE_AA,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
                 )
 
         if drew_mask:
