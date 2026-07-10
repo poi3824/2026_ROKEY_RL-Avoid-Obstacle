@@ -277,6 +277,9 @@ class BrainNode(Node):
             return
 
         self.get_logger().info(f"world map 스캔 완료: {result.message}")
+        # 2026-07-10: run_scan()이 스캔 그리드 마지막 pose(코너 근처)에서 그냥 끝나서
+        # home으로 안 돌아오는 문제 - pick/place 루프 종료 시와 동일하게 여기서도 명시적으로 복귀시킨다.
+        self._send_move_to(POSITION_COORDS["home"], "home")
         self._say("월드맵 스캔을 완료했습니다")
 
     def _send_move_to(self, pose, label=""):
