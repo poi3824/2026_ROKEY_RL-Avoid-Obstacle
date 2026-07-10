@@ -44,6 +44,17 @@ class YoloModel:
         # 이 락으로 직렬화한다(느린 프레임 수집 단계는 락 밖이라 서로 안 막음).
         self._model_lock = threading.Lock()
 
+    def _label_id(self, target):
+        """target 라벨 문자열 -> 내부 클래스 ID. class_name_tool.json에 없는
+        라벨(STT 오인식, 오타 등)이면 KeyError 대신 None을 반환한다.
+
+        2026-07-09 버그 수정: 이전엔 호출부들이 self.reversed_class_dict[target]을
+        가드 없이 직접 인덱싱해서, 미등록 라벨이 들어오면 KeyError가 서비스 콜백
+        (handle_check_visibility 등) 밖으로 조용히 새어나가 응답 자체가 안 가고
+        클라이언트가 타임아웃으로만 실패를 알 수 있었다.
+        """
+        return self.reversed_class_dict.get(target)
+
     def get_frames(self, img_node, count=FUSION_FRAME_COUNT, max_wait_sec=GET_FRAMES_MAX_WAIT_SEC):
         """count장을 채울 때까지 프레임을 모은다(카메라가 멈춰있으면 max_wait_sec에서 포기)."""
         end_time = time.time() + max_wait_sec
@@ -74,7 +85,10 @@ class YoloModel:
         """
         if frame is None:
             return False
-        label_id = self.reversed_class_dict[target]
+        label_id = self._label_id(target)
+        if label_id is None:
+            print(f"[has_label] unknown target label: '{target}'")
+            return False
         with self._model_lock:
             results = self.model([frame], verbose=False)
         detected = False
@@ -104,7 +118,10 @@ class YoloModel:
         if frame is None:
             return False
         h, w = frame.shape[:2]
-        label_id = self.reversed_class_dict[target]
+        label_id = self._label_id(target)
+        if label_id is None:
+            print(f"[is_fully_visible] unknown target label: '{target}'")
+            return False
         with self._model_lock:
             results = self.model([frame], verbose=False)
         for res in results:
@@ -139,7 +156,10 @@ class YoloModel:
         print("classes: ")
         print(results[0].names)
         detections = self._aggregate_detections(results)
-        label_id = self.reversed_class_dict[target]
+        label_id = self._label_id(target)
+        if label_id is None:
+            print(f"[get_best_detection] unknown target label: '{target}'")
+            return None, None, None, None
         print("label_id: ", label_id)
         print("detections: ", detections)
 

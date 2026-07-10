@@ -53,10 +53,25 @@ SWEEP_ACC = 30.0
 # hand 감지 타이머와 같은 주기 — object_detection_node에 과도한 부하를 주지 않으면서도
 # 스윕 도중 물체가 보이면 충분히 빠르게 반응한다.
 SWEEP_VISIBILITY_CHECK_INTERVAL_SEC = 0.3
+# motion_node.CHECK_VISIBILITY_TIMEOUT과 같은 값 — 논블로킹 가시성 체크(아래
+# sweep_to_detect 참고)가 이 시간 넘게 응답이 없으면 그 요청은 포기하고 다음
+# 주기에 새로 시작한다. 값 자체는 두 파일에 독립적으로 존재하지만(모듈 결합을
+# 피하려고), 같은 서비스 호출의 타임아웃이므로 한쪽만 바꾸면 다른 쪽도 맞출 것.
+CHECK_VISIBILITY_STALL_TIMEOUT_SEC = 2.0
 
 
 class EmergencyStop(Exception):
     """move_linear가 폴링 도중 응급 정지 요청을 감지하면 발생시킨다."""
+
+
+class GoalCancelled(Exception):
+    """move_linear/sweep_to_detect가 폴링 도중 goal 취소 요청을 감지하면 발생시킨다.
+
+    estop_event/hand_pause_event(안전 상태 기반, RUN이 되면 자동으로 clear됨)와
+    별개의 cancel_event를 쓴다 — 취소는 "멈췄다 재개"가 아니라 "멈추면 그걸로 끝"이라
+    _handle_interrupts의 hold-and-resume 루프에 태우면 안 되고, safety 하트비트가
+    estop_event를 지워도 취소 자체는 무효화되면 안 되기 때문이다.
+    """
 
 
 class MotionExecutor:
@@ -64,7 +79,7 @@ class MotionExecutor:
         self, movel, movej, mwait, gripper, velocity, acc, stop,
         get_surface_z=None, redetect=None, grip_min_width=None, logger=None,
         check_motion=None, estop_event=None, hand_pause_event=None,
-        dsr_lock=None,
+        dsr_lock=None, cancel_event=None,
     ):
         self._movel = movel  # amovel을 주입받는다 (위 모듈 주석 참고)
         self._movej = movej
@@ -88,9 +103,23 @@ class MotionExecutor:
         # robot_action_node가 구독해서 세팅/해제하는 이벤트. move_linear는 그냥
         # 이 값만 폴링한다.
         self._hand_pause_event = hand_pause_event
+        # 2026-07-09 버그 수정: goal 취소 전용 이벤트. estop_event에 얹어 쓰면
+        # safety_monitor의 RUN 하트비트(0.5초 주기)가 estop_event를 지울 때
+        # 취소 자체도 같이 무효화돼버리는 레이스가 있었다 — 완전히 분리한다.
+        self._cancel_event = cancel_event
         # amovel/check_motion/stop이 전부 dsr_node를 spin하므로, 동시 호출을
         # 막기 위해 이 락으로 감싼다.
         self._dsr_lock = dsr_lock if dsr_lock is not None else contextlib.nullcontext()
+
+    def _check_cancelled(self):
+        """cancel_event가 세팅돼 있으면 로봇을 멈추고 GoalCancelled를 던진다.
+
+        estop/hand_pause와 달리 "멈췄다 재개"가 없다 — 취소는 멈추면 그걸로 끝이라
+        _handle_interrupts의 hold-and-resume 루프를 타면 안 된다.
+        """
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            self._stop(HAND_PAUSE_STOP_MODE)
+            raise GoalCancelled("goal 취소 요청 감지")
 
     def _handle_interrupts(self, posx, velocity, acc):
         """이동 폴링 도중 응급정지/손 감지 일시정지를 처리한다.
@@ -105,6 +134,8 @@ class MotionExecutor:
         수 있다. 응급정지/손 일시정지 둘 다 같은 방식이라 하나로 합쳤다 —
         둘 중 하나라도 활성 상태면 멈추고, 둘 다 풀릴 때까지 기다렸다가 재개한다.
         """
+        self._check_cancelled()
+
         estop_active = self._estop_event is not None and self._estop_event.is_set()
         hand_active = self._hand_pause_event is not None and self._hand_pause_event.is_set()
         if not (estop_active or hand_active):
@@ -112,6 +143,7 @@ class MotionExecutor:
 
         self._stop(ESTOP_HOLD_STOP_MODE if estop_active else HAND_PAUSE_STOP_MODE)
         while True:
+            self._check_cancelled()
             estop_active = self._estop_event is not None and self._estop_event.is_set()
             hand_active = self._hand_pause_event is not None and self._hand_pause_event.is_set()
             if not (estop_active or hand_active):
@@ -140,6 +172,8 @@ class MotionExecutor:
         같은 인터럽트 인지 폴링(_poll_until_idle)을 두 번 돌려서 stale idle을
         잡는다 — 두 번째 폴링 동안에도 손 감지/응급정지를 계속 체크한다.
         """
+        self._check_cancelled()
+
         # self._stop은 (robot_action_node.stop) 자체적으로 dsr_lock을 잡으므로
         # 여기서는 self._movel/self._check_motion 호출만 감싼다 — self._stop
         # 호출을 dsr_lock 안에서 또 감싸면 non-reentrant lock이라 데드락난다.
@@ -154,6 +188,7 @@ class MotionExecutor:
         self._poll_until_idle(posx)
         self._poll_until_idle(posx)  # stale-idle 재확인, 위 docstring 참고
 
+        self._check_cancelled()
         if self._estop_event is not None and self._estop_event.is_set():
             raise EmergencyStop("이동 중 응급 정지 감지")
 
@@ -173,7 +208,9 @@ class MotionExecutor:
             time.sleep(MOTION_POLL_INTERVAL)
 
     def sweep_to_detect(self, pose_a, pose_b, is_visible_cb,
-                        visibility_check_interval=SWEEP_VISIBILITY_CHECK_INTERVAL_SEC):
+                        start_visibility_cb=None, poll_visibility_cb=None,
+                        visibility_check_interval=SWEEP_VISIBILITY_CHECK_INTERVAL_SEC,
+                        visibility_stall_timeout=CHECK_VISIBILITY_STALL_TIMEOUT_SEC):
         """pose_a -> pose_b로 느리게(SWEEP_VELOCITY) 이동하며 물체가 온전히 보이는지
         주기적으로 확인하다가, 보이는 즉시 멈추고 True를 반환한다.
 
@@ -188,6 +225,15 @@ class MotionExecutor:
         pose_a에서 이미 보이면 스윕 자체를 생략한다. pose_b까지 다 갔는데도
         못 찾으면(왕복 없이) False를 반환한다 — 호출부(motion_node)가 기존
         pick 실패와 동일하게 처리한다.
+
+        2026-07-09 버그 수정: 이동 중 반복 체크는 start_visibility_cb(논블로킹,
+        요청만 큐잉)/poll_visibility_cb(논블로킹, 완료 여부만 확인)로 한다.
+        이전엔 is_visible_cb()를 이동 폴링 루프 안에서 동기 호출했는데, 이
+        호출이 끝날 때까지(최대 수 초) 같은 루프의 _handle_interrupts()가 전혀
+        안 돌아 손 감지/응급정지 반응이 지연되는 문제가 있었다. is_visible_cb는
+        로봇이 이미 멈춰 있는 pose_a/최종 확인 시점에만 쓴다 — 그때는 모션
+        폴링 루프 자체가 없어 블로킹이어도 인터럽트 반응성에 영향이 없다.
+        start/poll 콜백이 없으면(하위 호환) 이전처럼 is_visible_cb를 그대로 쓴다.
         """
         self.move_linear(pose_a)
         if is_visible_cb():
@@ -200,9 +246,13 @@ class MotionExecutor:
             self._mwait()
             return is_visible_cb()
 
+        use_async_check = start_visibility_cb is not None and poll_visibility_cb is not None
+
         time.sleep(MOTION_START_SETTLE_SEC)
         last_check = time.time()
+        pending_since = None
         while True:
+            self._check_cancelled()
             with self._dsr_lock:
                 motion_state = self._check_motion()
             if motion_state == _DR_STATE_IDLE:
@@ -210,11 +260,25 @@ class MotionExecutor:
 
             self._handle_interrupts(pose_b, SWEEP_VELOCITY, SWEEP_ACC)
 
-            if time.time() - last_check >= visibility_check_interval:
+            if not use_async_check:
+                if time.time() - last_check >= visibility_check_interval:
+                    last_check = time.time()
+                    if is_visible_cb():
+                        self._stop()
+                        return True
+            elif pending_since is not None:
+                visible = poll_visibility_cb()
+                if visible is not None:
+                    pending_since = None
+                    if visible:
+                        self._stop()
+                        return True
+                elif time.time() - pending_since > visibility_stall_timeout:
+                    pending_since = None  # 응답 없는 요청은 포기하고 다음 주기에 새로 시작
+            elif time.time() - last_check >= visibility_check_interval:
                 last_check = time.time()
-                if is_visible_cb():
-                    self._stop()
-                    return True
+                start_visibility_cb()
+                pending_since = time.time()
 
             time.sleep(MOTION_POLL_INTERVAL)
 
@@ -285,7 +349,12 @@ class MotionExecutor:
             self.gripper.close_gripper()
             motion_done, grip_detected = self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
             width = self.gripper.get_width()
-            width_ok = width is None or width >= self.grip_min_width
+            # 2026-07-09 버그 수정: get_width()는 소켓 레벨에서 이미 2회 재시도한
+            # 뒤에도 실패해야 None을 반환한다 — 그런데도 None을 "통과"로 두면
+            # 이 검사를 추가한 목적(grip_detected 오탐 방지)이 정확히 그 순간에
+            # 무력화된다(Modbus 통신 문제 + 빈 그립이 겹치면 놓침). None도 실패로
+            # 처리해 기존 재시도/재탐지 경로를 타게 한다.
+            width_ok = width is not None and width >= self.grip_min_width
             success = bool(motion_done and grip_detected and width_ok)
             print(f"motion_done:{motion_done}, grip_detected: {grip_detected}, width_ok: {width_ok}, success: {success}")
 
