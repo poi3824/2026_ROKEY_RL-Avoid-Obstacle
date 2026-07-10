@@ -8,7 +8,6 @@
 # 경로에 아예 관여하지 않는다.
 import asyncio
 import json
-import signal
 import threading
 
 import rclpy
@@ -137,33 +136,45 @@ def main():
 
     clients = set()
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     node = VoiceBridge(loop, clients)
 
-    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
-    ros_thread.start()
+    # 2026-07-10 버그 수정: 이전엔 asyncio 루프를 메인 스레드에서 돌리고
+    # rclpy.spin()을 백그라운드 스레드로 돌렸는데, 그 상태에서 SIGINT(Ctrl+C)를
+    # 받으면 "terminate called without an active exception"(core dump)으로
+    # 죽는 걸 asyncio 시그널 핸들러를 넣은 뒤에도 실기로 재확인했다. asyncio
+    # signal handler로는 못 고치는 문제였다 - rclpy.init()이 내부적으로 등록하는
+    # SIGINT 처리가 "메인 스레드에서 spin"을 전제하는 것으로 보인다(이 코드베이스의
+    # 다른 모든 노드처럼). 그래서 반대로 asyncio 루프를 백그라운드 스레드로 돌리고
+    # rclpy.spin()을 메인 스레드에 둔다(vision_bridge.py와 동일한 수정).
+    def _run_loop():
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
 
-    # 2026-07-10: bare KeyboardInterrupt에 기대면(try/except) Ctrl+C가 asyncio의
-    # C 레벨 select 대기 도중 들어와서 "terminate called without an active
-    # exception" / Aborted로 지저분하게 죽는 걸 실기로 확인했다. asyncio
-    # 시그널 핸들러로 루프 내부에서 정지 신호를 받아 깔끔하게 빠져나가게 한다.
-    stop_event = loop.create_future()
+    loop_thread = threading.Thread(target=_run_loop, daemon=True)
+    loop_thread.start()
 
-    def _request_stop():
-        if not stop_event.done():
-            stop_event.set_result(None)
+    server_holder = {}
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _request_stop)
+    async def _start_server():
+        server = await websockets.serve(lambda ws: _handler(ws, clients, node), WS_HOST, WS_PORT)
+        server_holder["server"] = server
+        node.get_logger().info(f"voice_bridge websocket 서버 시작: ws://{WS_HOST}:{WS_PORT}")
 
-    async def _serve():
-        async with websockets.serve(lambda ws: _handler(ws, clients, node), WS_HOST, WS_PORT):
-            node.get_logger().info(f"voice_bridge websocket 서버 시작: ws://{WS_HOST}:{WS_PORT}")
-            await stop_event
+    asyncio.run_coroutine_threadsafe(_start_server(), loop).result()
 
     try:
-        loop.run_until_complete(_serve())
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
+        server = server_holder.get("server")
+        if server is not None:
+            async def _close_server():
+                server.close()
+                await server.wait_closed()
+            asyncio.run_coroutine_threadsafe(_close_server(), loop).result()
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2.0)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
