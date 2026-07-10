@@ -29,7 +29,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ] + data_files_for('templates', 'templates') + data_files_for('static', 'static'),
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'websockets'],
     zip_safe=True,
     maintainer='soo',
     maintainer_email='poi3824@gmail.com',
@@ -43,6 +43,7 @@ setup(
     entry_points={
         'console_scripts': [
             'hmi_interface_server = hmi_interface.app:main',
+            'hmi_voice_bridge = hmi_interface.voice_bridge:main',
         ],
     },
 )
