@@ -29,7 +29,7 @@ class STT:
             # Whisper API 호출
             with open(temp_wav.name, "rb") as f:
                 transcript = self.client.audio.transcriptions.create(
-                    model="whisper-1", file=f)
+                    model="whisper-1", file=f, language="ko")
 
         print("STT 결과: ", transcript.text, flush=True)
         return transcript.text
