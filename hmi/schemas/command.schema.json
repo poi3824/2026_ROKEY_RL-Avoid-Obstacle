@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hmi.local/schemas/command.schema.json",
+  "title": "Command",
+  "description": "Browser -> Flask(default ns) -> Flask(/ros ns) -> hmi_ros_bridge. command_id는 Flask와 Bridge 양쪽에서 각자 중복 실행 방지에 사용된다.",
+  "type": "object",
+  "required": ["command_id", "action"],
+  "properties": {
+    "command_id": {
+      "type": "string",
+      "description": "브라우저가 생성하는 UUID. 재연결/재시도 시에도 동일 명령이면 같은 값을 재사용해야 dedup이 동작한다."
+    },
+    "action": {
+      "type": "string",
+      "description": "예: 'voice.start_record', 'voice.stop_record', 'safety.reset'"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}

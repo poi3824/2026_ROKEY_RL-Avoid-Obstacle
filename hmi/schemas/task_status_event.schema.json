@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hmi.local/schemas/task_status_event.schema.json",
+  "title": "TaskStatusEvent",
+  "description": "hmi_ros_bridge가 /hmi/task_status/manipulation 과 /hmi/task_status/world_map 두 ROS 토픽을 구독 토픽 기준으로 강제 태깅해 하나의 Socket.IO 'task_status' 이벤트로 통합한 Web envelope. task_status.schema.json(ROS 본문)을 감싸는 봉투이며 둘을 섞지 않는다.",
+  "type": "object",
+  "required": ["source", "status"],
+  "properties": {
+    "source": {
+      "type": "string",
+      "enum": ["manipulation", "world_map"],
+      "description": "bridge가 어느 ROS 토픽에서 수신했는지로 결정 - 발행 노드의 status.mode 값과 무관하게 항상 정확함"
+    },
+    "status": {
+      "$ref": "task_status.schema.json"
+    }
+  },
+  "additionalProperties": false
+}

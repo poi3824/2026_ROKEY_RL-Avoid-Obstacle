@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hmi.local/schemas/task_status.schema.json",
+  "title": "TaskStatus",
+  "description": "ROS 노드(brain_node/world_map_node)가 /hmi/task_status/<source> 토픽(std_msgs/String, JSON)으로 발행하는 본문. 정본(source of truth)은 항상 이 스키마이며 command_result는 여기서만 파생된다.",
+  "type": "object",
+  "required": ["task_id", "mode", "status", "timestamp"],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "이 태스크 실행 1회를 식별. 생성 방식은 Phase 5 전에 확정(brain_node의 Action goal UUID 재사용 여부 확인 필요)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["pick_place", "move_to", "world_map_scan"]
+    },
+    "phase": {
+      "type": "string",
+      "description": "Action feedback(phase/attempt 등)에서 그대로 옮겨온 세부 단계 - 보조 정보, UI가 이것만으로 상태를 판단하지 않는다."
+    },
+    "title": {
+      "type": "string",
+      "description": "사람이 읽는 요약, 예: '빨간 통을 1번 위치로 옮기기'"
+    },
+    "detail": {
+      "type": "string"
+    },
+    "step_index": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "step_total": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "progress": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["IDLE", "WAITING", "RUNNING", "COMPLETED", "FAILED"],
+      "description": "COMPLETED/FAILED만 terminal. command_result의 terminal_status는 이 값에서만 기계적으로 파생된다."
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "epoch seconds"
+    }
+  },
+  "additionalProperties": false
+}

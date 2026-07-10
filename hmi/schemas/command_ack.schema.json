@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hmi.local/schemas/command_ack.schema.json",
+  "title": "CommandAck",
+  "description": "짧은 명령에는 최종 응답, 장시간 작업(task를 만드는 명령)에는 '접수됨' 응답. ok는 '접수 성공/거부'만 의미하며(예: 중복 command_id, ROS 서비스 unavailable) task의 최종 성패와는 무관하다 - 그건 command_result가 담당.",
+  "type": "object",
+  "required": ["command_id", "ok", "timestamp"],
+  "properties": {
+    "command_id": {
+      "type": "string"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "task_id": {
+      "type": ["string", "null"],
+      "description": "이 명령이 태스크를 생성했다면 채워짐. Phase 0에서는 항상 null 허용 - task_id 발급 방식은 Phase 5 전에 확정."
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "timestamp": {
+      "type": "number"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hmi.local/schemas/command_result.schema.json",
+  "title": "CommandResult",
+  "description": "장시간 작업 전용. Flask 백엔드가 자체적으로 성패를 판단하지 않고, 동일 task_id의 terminal task_status(COMPLETED/FAILED)를 relay하는 시점에 pending 목록과 매칭해 이 이벤트를 합성한다. hmi_ros_bridge는 이 이벤트를 만들지 않는다(순수 ROS<->Socket.IO 중계만 담당).",
+  "type": "object",
+  "required": ["command_id", "terminal_status", "timestamp"],
+  "properties": {
+    "command_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": ["string", "null"]
+    },
+    "terminal_status": {
+      "type": "string",
+      "enum": ["COMPLETED", "FAILED"],
+      "description": "대응하는 task_status.status에서 기계적으로 그대로 복사 - 별도 ok boolean으로 재해석하지 않는다."
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "timestamp": {
+      "type": "number"
+    }
+  },
+  "additionalProperties": false
+}

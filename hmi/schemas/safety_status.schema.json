@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hmi.local/schemas/safety_status.schema.json",
+  "title": "SafetyStatus",
+  "description": "safety_monitor_node가 이미 발행 중인 /safety/state(robot_interfaces/msg/SafetyState)를 hmi_ros_bridge가 그대로 옮긴 것 - 노드 쪽 수정 없음. Task 상태와 절대 섞지 않는다(별도 모델).",
+  "type": "object",
+  "required": ["state", "timestamp"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": ["RUN", "PAUSE", "ESTOP"]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "number"
+    }
+  },
+  "additionalProperties": false
+}
