@@ -1,4 +1,3 @@
-
 import os
 import tempfile
 import subprocess
@@ -26,13 +25,14 @@ class TTS:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
                 audio_path = temp_audio.name
 
-            response = self.client.audio.speech.create(
+            # OpenAI TTS 생성 (최신 권장 방식)
+            with self.client.audio.speech.with_streaming_response.create(
                 model="tts-1",
                 voice=self.voice,
                 input=text,
-            )
+            ) as response:
 
-            response.stream_to_file(audio_path)
+                response.stream_to_file(audio_path)
 
             subprocess.run(
                 ["mpg123", "-q", audio_path],
