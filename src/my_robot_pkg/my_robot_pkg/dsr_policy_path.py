@@ -150,7 +150,11 @@ ACTION_CLAMP = 5.0
 # not an instant teleport-to-target the way movej+mwait's exact tracking does). Midpoint of that measured
 # range; not a stable per-joint constant, so this is a single approximation, not an exact match.
 SETTLING_RATIO = 0.225
-GOAL_POS_THRESHOLD_M = 0.03 # matches this task's goal_reached termination
+# 2026-07-10: 0.03 -> 0.04로 상향. 실기에서 pos_err가 3.5cm(구 threshold 3cm 바로
+# 위)에 멈춰 수렴 판정을 못 받고 계속 도는 경우가 확인됨(dsr_policy_path 모듈
+# docstring 캐비어트 10의 "genuine but wrong equilibrium"과 일치) - 아직 충분히
+# 학습되지 않은 체크포인트라는 걸 감안해 도달 판정 범위를 넓힌다.
+GOAL_POS_THRESHOLD_M = 0.04
 MAX_STEPS = 360  # matches this task's time_out horizon
 # Interactive prompt's default (see conversation 2026-07-08) -- deliberately much lower than MAX_STEPS
 # (the task's true horizon, still used as run_policy_live's own function-level default): while this

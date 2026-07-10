@@ -34,10 +34,20 @@
 # "[node_name-N] ..." 형식 그대로 같이 쌓인다. 노드별로 나눠 보려면 grep "\[motion_node"
 # 처럼 prefix로 걸러서 보면 된다(노드별 완전히 분리된 파일이 필요하면 own_log가 포함된
 # output="full"로 바꿔야 하지만, 그러면 파일이 더 늘어난다).
+#
+# 2026-07-10 버그 수정: output="both"만으로는 부족했다 — 파이프로 연결된 stdout은
+# Python이 라인 버퍼링이 아니라 풀 버퍼링을 쓰기 때문에, print()가 실행된 시점이
+# 아니라 내부 버퍼가 찰 때(또는 프로세스 종료 시)에야 로그에 나타난다. 실측: 프로세스
+# 시작 시점에 찍힌 print가 233초 뒤에야 로그에 등장, RL reach 스텝 130개가 사실상
+# 동일 타임스탬프로 찍힘 — 실시간 진단이 불가능했고, 자칫 "프로세스가 죽었다 재시작한
+# 줄" 오해할 뻔했다(PID 비교로 아니라고 확인). PYTHONUNBUFFERED=1로 모든 노드의
+# stdout을 언버퍼드로 강제한다.
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+UNBUFFERED_ENV = {"PYTHONUNBUFFERED": "1"}
 
 
 def generate_launch_description():
@@ -52,32 +62,32 @@ def generate_launch_description():
 
     object_detection_node = Node(
         package="object_detection", executable="object_detection_node",
-        name="object_detection_node", output="both",
+        name="object_detection_node", output="both", additional_env=UNBUFFERED_ENV,
     )
     get_keyword_node = Node(
         package="voice_interface", executable="get_keyword_node",
-        name="get_keyword_node", output="both",
+        name="get_keyword_node", output="both", additional_env=UNBUFFERED_ENV,
     )
     safety_monitor_node = Node(
         package="safety_monitor", executable="safety_monitor_node",
-        name="safety_monitor_node", output="both",
+        name="safety_monitor_node", output="both", additional_env=UNBUFFERED_ENV,
     )
     motion_node = Node(
         package="my_robot_pkg", executable="motion_node",
-        name="motion_node", output="both",
+        name="motion_node", output="both", additional_env=UNBUFFERED_ENV,
         parameters=[{"grip_min_width_mm": grip_min_width}],
     )
     brain_node = Node(
         package="my_robot_pkg", executable="brain_node",
-        name="brain_node", output="both",
+        name="brain_node", output="both", additional_env=UNBUFFERED_ENV,
     )
     world_map_node = Node(
         package="pointcloud_perception", executable="world_map_node",
-        name="world_map_node", output="both",
+        name="world_map_node", output="both", additional_env=UNBUFFERED_ENV,
     )
     rl_avoidance_node = Node(
         package="obstacle_avoidance", executable="rl_avoidance_node",
-        name="rl_avoidance_node", output="both",
+        name="rl_avoidance_node", output="both", additional_env=UNBUFFERED_ENV,
     )
 
     return LaunchDescription(args + [
