@@ -40,6 +40,8 @@ RESOURCE_PATH = os.path.join(PACKAGE_PATH, "resource")
 ENV_PATH = os.path.join(RESOURCE_PATH, ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 openai_api_key = os.getenv("OPENAI_API_KEY")
+if openai_api_key is None:
+    raise RuntimeError(f"OPENAI_API_KEY not found: {ENV_PATH}")
 
 # 2026-07-06: robot_action_node가 pick/place로 바쁜 동안에는 get_keyword 서비스가
 # 호출되지 않아서, 그동안 웨이크워드/STT가 전혀 안 돌고 있었다 (음성으로 "정지"를
@@ -75,6 +77,20 @@ STOP_KEYWORDS = ("정지", "멈춰", "스톱", "중지", "그만")
 # 심한 환경에서는 Whisper가 배경 소음도 뭔가로 전사해버려서 침묵 판정이 잘 안 되기
 # 때문 — 그래서 세션 종료 기준을 "침묵"이 아니라 경과 시간으로 건다.
 MAX_SESSION_SEC = 5.0
+
+# 2026-07-10: 슬롯필링(멀티턴) 기능. 지금까지는 "빨간색 통"처럼 목적지 없이 말하면
+# LLM이 UNKNOWN을 채워 넣은 채로 brain_node까지 넘어가서 조용히 스킵됐다(사용자
+# 입장에선 아무 반응이 없었던 것처럼 보임). 이제는 obj/source/target 중 하나라도
+# 빠지면 되묻고, 다음 발화에서 마저 채워지면 완성된 명령으로 합친다(단일 물체
+# 명령에만 적용 - 여러 물체를 한 번에 말하는 기존 패턴은 그대로 즉시 처리).
+# 2026-07-10 버그 수정: 15초는 너무 짧았다 — 되묻기 TTS 재생(수 초) + STT가 매번
+# 고정 5초를 대기하는 구조(record_seconds=5) + Whisper/LLM 왕복까지 합치면 두 턴
+# 사이에 16초 이상 걸리는 게 실측으로 확인됐다(그러면 답을 말하기도 전에 보류
+# 슬롯이 초기화돼버림). 실제 턴 간격보다 여유 있게 30초로 늘린다.
+PENDING_TIMEOUT_SEC = 30.0  # 이 시간 안에 나머지를 안 채우면 보류 상태를 버린다
+ASK_OBJECT_MESSAGE = "어떤 물체를 옮길까요? 빨간색, 파란색, 초록색 중에서 말씀해주세요."
+ASK_TARGET_MESSAGE = "어디로 옮길까요? 1번, 2번, 3번 위치 중에서 말씀해주세요."
+ASK_SOURCE_MESSAGE = "어디에 있는 물체인가요? 시작 위치, 1번, 2번, 3번 중에서 말씀해주세요."
 
 # 2026-07-08: TTS(로봇 음성 응답). brain_node가 이 토픽으로 말할 텍스트를 던지면
 # 여기서 재생한다. 웨이크워드 리스너와 같은 노드에 둔 이유는, 로봇이 말하는 동안
@@ -116,6 +132,7 @@ class GetKeyword(Node):
 - obj_A
 - obj_B
 - obj_C
+- UNKNOWN
 
 <YOLO 클래스 매핑>
 - obj_B → class id 0
@@ -131,6 +148,7 @@ class GetKeyword(Node):
 - target1
 - target2
 - target3
+- UNKNOWN
 
 <위치 의미>
 - home: 로봇팔의 대기 위치
@@ -192,6 +210,8 @@ obj_A / scan / target1 / home
 - 객체 수와 출발지 수와 목적지 수는 서로 대응되도록 작성합니다.
 - 출발지가 명시되지 않은 경우 기본값은 scan으로 간주합니다.
 - 목적지가 명시되지 않은 경우 목적지는 UNKNOWN으로 출력합니다.
+- 단, 사용자가 객체만 말한 경우 출발지는 UNKNOWN, 목적지는 UNKNOWN으로 출력합니다.
+- 사용자가 목적지만 말한 경우 객체는 UNKNOWN, 출발지는 UNKNOWN으로 출력합니다.
 - 작업 완료 후 복귀 위치는 항상 home입니다.
 - 설명이나 추가 문장은 절대 출력하지 않습니다.
 - "가져와", "갖다 놔", "이동해", "옮겨", "이동시켜"는 모두 이동 명령으로 간주합니다.
@@ -199,9 +219,9 @@ obj_A / scan / target1 / home
 - "출력:", "결과:", "설명:" 등의 문구를 절대 포함하지 않습니다.
 
 <객체 매핑>
-- "빨간색 통", "빨간거", "빨간색", "빨간 시약" → obj_A
-- "파란색 통", "파란거", "파란색", "파란 시약" → obj_B
-- "초록색 통", "초록거", "초록색", "초록 시약" → obj_C
+- "빨간색 통", "빨간거", "빨간색", "빨간 시약", "빨강" → obj_A
+- "파란색 통", "파란거", "파란색", "파란 시약", "파랑" → obj_B
+- "초록색 통", "초록거", "초록색", "초록 시약", "초록" → obj_C
 
 <위치 매핑>
 - "대기 위치", "대기 지점", "홈", "home" → home
@@ -259,6 +279,18 @@ obj_A obj_B / scan scan / target1 target2 / home
 
 출력:
 obj_A / scan / UNKNOWN / home
+
+입력:
+빨간색 통
+
+출력:
+obj_A / UNKNOWN / UNKNOWN / home
+
+입력:
+2번으로
+
+출력:
+UNKNOWN / UNKNOWN / target2 / home
 
 입력:
 월드맵 맵핑해
@@ -388,6 +420,10 @@ RESUME / RESUME / RESUME / RESUME
         self._latest_command = None
         self._command_ready = threading.Event()
 
+        # 2026-07-10: 슬롯필링 상태. PENDING_TIMEOUT_SEC 주석 참고.
+        self._pending_slots = self._new_pending_slots()
+        self._pending_time = 0.0
+
         # 2026-07-08: TTS. brain_node가 /tts/speak로 던진 텍스트를 재생한다.
         # _speaking은 재생 중임을 알려 웨이크워드 리스너를 잠시 멈추는 플래그.
         #
@@ -498,6 +534,7 @@ RESUME / RESUME / RESUME / RESUME
 
                 if any(word in output_message for word in STOP_KEYWORDS):
                     self.get_logger().warn(f"정지 키워드 감지(로컬): '{output_message}' -> 응급정지 호출")
+                    self._clear_pending_slots()
                     self._call_emergency_stop()
                     continue
 
@@ -514,6 +551,7 @@ RESUME / RESUME / RESUME / RESUME
                     self.get_logger().warn(
                         f"정지 키워드 감지(LLM): STT='{output_message}' -> 응급정지 호출"
                     )
+                    self._clear_pending_slots()
                     self._call_emergency_stop()
                     continue
 
@@ -521,6 +559,7 @@ RESUME / RESUME / RESUME / RESUME
                     # 2026-07-09: brain_node로 안 넘기고 여기서 바로 처리 —
                     # _call_safety_reset() 주석 참고(brain_node 메인 루프 블로킹 문제).
                     self.get_logger().warn(f"재개 명령 감지(LLM): STT='{output_message}'")
+                    self._clear_pending_slots()
                     self._call_safety_reset()
                     self._speak_locally("다시 시작합니다")
                     break
@@ -529,25 +568,65 @@ RESUME / RESUME / RESUME / RESUME
                     # 2026-07-09: hand 감지 오탐(YOLO) 임시 완화 — RESUME과 같은
                     # 이유로 brain_node를 거치지 않고 여기서 바로 처리한다.
                     self.get_logger().warn(f"손 감지 무시 명령(LLM): STT='{output_message}'")
+                    self._clear_pending_slots()
                     self._call_ignore_hand()
                     self._speak_locally("손 아닌 걸로 하겠습니다")
                     break
 
-                # obj, source, target, return_pos는 각각 리스트이므로
-                # " ".join(keyword)처럼 튜플을 바로 join하면
-                # 각 원소가 str이 아닌 list라 TypeError가 발생한다.
-                # 따라서 모든 리스트를 하나의 문자열 리스트로 평탄화(flatten)한 뒤 join한다.
-                keyword_str = (
-                    f"{' '.join(obj)} / "
-                    f"{' '.join(source)} / "
-                    f"{' '.join(target)} / "
-                    f"{' '.join(return_pos)}"
-                )
+                # 2026-07-10: 슬롯필링 — 물체가 하나뿐인 명령(obj/source/target/return_pos
+                # 각 리스트가 길이 1 이하)만 대상으로 한다. 여러 물체를 한 번에 말하는
+                # 기존 패턴("빨간색 통은 1번으로, 파란색 통은 2번으로")은 _first_valid()가
+                # 첫 값만 취하는 구조라 슬롯필링을 타면 나머지 물체를 잃어버린다 — 그런
+                # 경우는 기존처럼 바로 완결된 명령으로 처리한다.
+                is_multi_object = max(len(obj), len(source), len(target), len(return_pos)) > 1
+                if is_multi_object:
+                    # 여러 물체 명령이 들어오면, 진행 중이던(단일 물체) 슬롯필링 보류 상태는
+                    # 이 새 명령과 무관하므로 버린다 — 안 지우면 나중에 엉뚱한 단일 물체
+                    # 발화와 잘못 합쳐질 수 있다.
+                    self._clear_pending_slots()
 
-                self.get_logger().warn(f"Detected tools: {keyword_str}")
+                    # obj, source, target, return_pos는 각각 리스트이므로
+                    # " ".join(keyword)처럼 튜플을 바로 join하면
+                    # 각 원소가 str이 아닌 list라 TypeError가 발생한다.
+                    # 따라서 모든 리스트를 하나의 문자열 리스트로 평탄화(flatten)한 뒤 join한다.
+                    keyword_str = (
+                        f"{' '.join(obj)} / "
+                        f"{' '.join(source)} / "
+                        f"{' '.join(target)} / "
+                        f"{' '.join(return_pos)}"
+                    )
+                    # 2026-07-10 버그 수정: 여러 물체 명령은 슬롯필링 대상이 아니라서
+                    # UNKNOWN이 섞여 있어도 그대로 brain_node에 넘어갔다. brain_node는
+                    # POSITION_COORDS.get("UNKNOWN")이 None이라 조용히 skip하고 home으로
+                    # 복귀한 뒤 "작업을 완료했습니다"라고 말해버려서(실측), 아무것도 옮기지
+                    # 않았는데 사용자에게는 성공한 것처럼 보였다. 여기서 미리 걸러 되묻는다.
+                    if "UNKNOWN" in obj or "UNKNOWN" in source or "UNKNOWN" in target:
+                        completed_command = None
+                        missing_message = (
+                            "여러 물체를 옮길 때는 각 물체와 목적지를 모두 말씀해주세요. "
+                            "예를 들어 빨간색 통은 1번으로, 파란색 통은 2번으로 옮겨줘, 처럼요."
+                        )
+                    else:
+                        completed_command = keyword_str
+                else:
+                    completed_command = self._update_slots_and_build_command(obj, source, target, return_pos)
+                    missing_message = self._get_missing_slot_message()
 
+                if completed_command is None:
+                    self.get_logger().warn(f"명령 정보 부족 -> 되묻기: {missing_message}")
+                    self._speak_locally(missing_message)
+                    # 2026-07-10 버그 수정: STT+LLM 처리(수 초) + 되묻기 TTS 재생(수 초)만으로
+                    # 이미 MAX_SESSION_SEC(5초)를 다 써버려서, 사용자가 답하기도 전에 세션이
+                    # 끝나 재웨이크 없이는 답을 못 듣는 문제가 있었다(실측). 되물은 직후에는
+                    # 답변을 위한 시간을 새로 온전히 준다.
+                    session_start = time.time()
+                    continue  # 세션 유지 - 재웨이크 없이 다음 발화를 계속 듣는다
+
+                self.get_logger().warn(f"Detected tools: {completed_command}")
+
+                self._clear_pending_slots()
                 with self._lock:
-                    self._latest_command = keyword_str
+                    self._latest_command = completed_command
                 self._command_ready.set()
                 break  # 유효한 명령 하나 처리했으니 세션 종료 — 다음 명령은 재웨이크 필요
 
@@ -568,6 +647,84 @@ RESUME / RESUME / RESUME / RESUME
             # 불연속으로 여전히 오탐(실측: 처리 완료 67ms 만에 재감지)이 났다.
             # 모델 자체를 리셋해서 항상 "방금 시작한" 상태로 판단하게 한다.
             self.wakeup_word.reset()
+
+    def _new_pending_slots(self):
+        return {"obj": None, "source": None, "target": None, "return_pos": "home"}
+
+    def _update_slots_and_build_command(self, obj, source, target, return_pos):
+        """obj/source/target/return_pos(각각 리스트, UNKNOWN 포함 가능)를 기존 pending
+        슬롯과 합친다. 네 슬롯이 다 채워지면 완성된 명령 문자열을, 아직 부족하면
+        None을 반환한다(_listen_loop가 None이면 되묻고 계속 듣는다).
+        """
+        now = time.time()
+        if self._has_pending_slots() and now - self._pending_time > PENDING_TIMEOUT_SEC:
+            self.get_logger().warn("보류 명령 시간이 초과되어 초기화합니다.")
+            self._clear_pending_slots()
+        self._pending_time = now
+
+        obj_value = self._first_valid(obj)
+        source_value = self._first_valid(source)
+        target_value = self._first_valid(target)
+        return_value = self._first_valid(return_pos)
+
+        if obj_value is not None:
+            self._pending_slots["obj"] = obj_value
+        if source_value is not None:
+            self._pending_slots["source"] = source_value
+        if target_value is not None:
+            self._pending_slots["target"] = target_value
+        if return_value is not None:
+            self._pending_slots["return_pos"] = return_value
+
+        # 객체를 인식했는데 출발지가 없다면 기본 출발지는 scan.
+        if self._pending_slots["source"] is None and self._pending_slots["obj"] is not None:
+            self._pending_slots["source"] = "scan"
+
+        if not self._is_slots_complete():
+            return None
+
+        return (
+            f"{self._pending_slots['obj']} / "
+            f"{self._pending_slots['source']} / "
+            f"{self._pending_slots['target']} / "
+            f"{self._pending_slots['return_pos']}"
+        )
+
+    def _first_valid(self, values):
+        """values(리스트)에서 UNKNOWN/STOP/RESUME/WORLD_MAP/IGNORE_HAND가 아닌
+        첫 값을 반환한다. 없으면 None(이번 발화에서 이 슬롯은 안 채워졌다는 뜻)."""
+        for value in values:
+            if value not in ("UNKNOWN", "STOP", "RESUME", "WORLD_MAP", "IGNORE_HAND"):
+                return value
+        return None
+
+    def _has_pending_slots(self):
+        return (
+            self._pending_slots["obj"] is not None
+            or self._pending_slots["source"] is not None
+            or self._pending_slots["target"] is not None
+        )
+
+    def _is_slots_complete(self):
+        return (
+            self._pending_slots["obj"] is not None
+            and self._pending_slots["source"] is not None
+            and self._pending_slots["target"] is not None
+            and self._pending_slots["return_pos"] is not None
+        )
+
+    def _get_missing_slot_message(self):
+        if self._pending_slots["obj"] is None:
+            return ASK_OBJECT_MESSAGE
+        if self._pending_slots["target"] is None:
+            return ASK_TARGET_MESSAGE
+        if self._pending_slots["source"] is None:
+            return ASK_SOURCE_MESSAGE
+        return "명령을 완성하지 못했습니다. 다시 말씀해주세요."
+
+    def _clear_pending_slots(self):
+        self._pending_slots = self._new_pending_slots()
+        self._pending_time = 0.0
 
     def _flush_mic_stream(self):
         """STT(sounddevice) 녹음 동안 밀린 PyAudio 웨이크워드 스트림 버퍼를 비운다.
