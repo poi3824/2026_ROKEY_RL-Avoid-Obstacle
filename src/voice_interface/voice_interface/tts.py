@@ -48,4 +48,3 @@ class TTS:
                     os.remove(audio_path)
             except Exception:
                 pass
-
