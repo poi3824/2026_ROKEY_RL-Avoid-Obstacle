@@ -98,7 +98,13 @@ class BrainNode(Node):
         safety_qos = QoSProfile(depth=1)
         safety_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         safety_qos.reliability = ReliabilityPolicy.RELIABLE
-        self._safety_state = SafetyState.RUN
+        # 2026-07-09 버그 수정: 처음엔 RUN이 아니라 None(미확인)으로 시작한다.
+        # 이전엔 기본이 RUN이라, safety_monitor가 이미 ESTOP/PAUSE를 래치한 상태에서
+        # brain_node가 재시작되면 TRANSIENT_LOCAL 구독이 실제 상태를 받기 전까지의
+        # 짧은 창 동안 execute_command의 안전 체크(`!= SafetyState.RUN`)가 실제로는
+        # 안전하지 않은데도 통과했다. None은 RUN과 항상 다르므로 그 체크가 그대로
+        # "안전 미확인 = 정지 상태"로 처리해준다.
+        self._safety_state = None
         self.create_subscription(
             SafetyState, "/safety/state", self._on_safety_state, safety_qos
         )
@@ -235,7 +241,19 @@ class BrainNode(Node):
             else:
                 self._say("놓았습니다")
 
-        self._send_move_to(POSITION_COORDS["home"], "home")
+        # 2026-07-09 버그 수정: 이전엔 이 마지막 home 복귀만 결과를 확인 안 하고
+        # 바로 "완료했습니다"를 말했다 — 복귀 도중 손 감지/ESTOP이 걸려도 사용자는
+        # 정상 종료로 안내받았다. pick/place와 동일하게 결과를 확인한다.
+        move_res = self._send_move_to(POSITION_COORDS["home"], "home")
+        if move_res is None or not move_res.success:
+            reason = move_res.message if move_res else "no result"
+            self.get_logger().warn(f"home 복귀 실패({reason})")
+            if self._safety_state != SafetyState.RUN:
+                self.get_logger().warn("안전 정지 상태 감지 — RESUME 대기")
+                self._say("정지했습니다")
+            else:
+                self._say("복귀에 실패했습니다")
+            return
         self._say("작업을 완료했습니다")
 
     # ---- Action / service 헬퍼 ----

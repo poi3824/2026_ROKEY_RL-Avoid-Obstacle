@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>통합 시스템 HMI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --ink: #10151f;
+            --ink-soft: #5a6478;
+            --muted: #97a0b3;
+            --line: #e6e9f0;
+            --surface: #ffffff;
+            --page: #f3f5f9;
+            --accent: #2f5fe0;
+            --accent-soft: #eaf0ff;
+            --accent-ink: #1f3fa0;
+            --good: #12946b;
+            --good-bg: #e3f6ee;
+            --warn: #c07a10;
+            --warn-bg: #fdf1dc;
+            --critical: #d1373f;
+            --critical-bg: #fbe4e5;
+            --radius: 14px;
+            --shadow: 0 1px 2px rgba(16,21,31,.04), 0 10px 24px -14px rgba(16,21,31,.16);
+        }
+
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            background: var(--page);
+            color: var(--ink);
+            font-family: "Inter", -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+            font-size: 14px;
+        }
+
+        .app { display: flex; min-height: 100vh; align-items: stretch; }
+
+        /* ---------------- sidebar ---------------- */
+        .sidebar {
+            width: 236px;
+            flex: 0 0 236px;
+            background: var(--surface);
+            border-right: 1px solid var(--line);
+            padding: 22px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .brand { display: flex; align-items: center; gap: 10px; padding: 2px 10px 22px; }
+        .brand .mark {
+            width: 32px; height: 32px; border-radius: 10px; background: var(--accent); color: #fff;
+            display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; flex: 0 0 32px;
+        }
+        .brand .name { font-weight: 700; font-size: 14.5px; letter-spacing: -.01em; }
+        .brand .sub { font-size: 11px; color: var(--muted); }
+
+        .side-label {
+            font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .07em; padding: 16px 12px 6px;
+        }
+        .side-link {
+            display: flex; align-items: center; gap: 11px; padding: 9px 12px; border-radius: 10px;
+            color: var(--ink-soft); font-size: 13.5px; font-weight: 600; cursor: pointer;
+            border: none; background: none; width: 100%; text-align: left;
+        }
+        .side-link .ic { width: 18px; text-align: center; font-size: 15px; opacity: .8; }
+        .side-link:hover:not(.active) { background: var(--page); color: var(--ink); }
+        .side-link.active { background: var(--accent); color: #fff; box-shadow: 0 6px 14px -6px rgba(47,95,224,.55); }
+        .side-link.active .ic { opacity: 1; }
+
+        /* ---------------- main ---------------- */
+        main { flex: 1; min-width: 0; padding: 26px 30px 60px; }
+        .topbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 22px; }
+        .topbar h1 { font-size: 21px; font-weight: 800; margin: 0; letter-spacing: -.01em; }
+        .topbar .clock { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+        .panel { display: none; }
+        .panel.show { display: block; }
+        .panel h2 { font-size: 15px; font-weight: 700; margin: 0 0 4px; }
+        .panel .lede { font-size: 13px; color: var(--ink-soft); margin-bottom: 18px; max-width: 720px; }
+
+        .note {
+            display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; color: var(--warn);
+            background: var(--warn-bg); border-radius: 10px; padding: 10px 14px; margin-bottom: 18px; max-width: 760px;
+        }
+        .note code { background: rgba(16,21,31,.06); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; color: var(--ink); }
+        .note.ready { color: var(--good); background: var(--good-bg); }
+
+        .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+        .kpi {
+            background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+            box-shadow: var(--shadow); padding: 16px 18px;
+        }
+        .kpi .label { font-size: 12px; color: var(--ink-soft); font-weight: 600; margin-bottom: 10px; }
+        .kpi .value { font-size: 26px; font-weight: 800; letter-spacing: -.01em; }
+        .kpi .value.small { font-size: 17px; }
+
+        .card {
+            background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+            box-shadow: var(--shadow); padding: 18px 20px; margin-bottom: 18px;
+        }
+        .card h3 { font-size: 12.5px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase;
+            letter-spacing: .04em; margin: 0 0 14px; }
+
+        /* node status: compact tiles with LED, flex-wrap so the last row fills evenly */
+        .node-tiles { display: flex; flex-wrap: wrap; gap: 8px; }
+        .node-tile {
+            flex: 1 1 128px; min-width: 108px;
+            border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+            padding: 9px 11px 8px; display: flex; flex-direction: column; gap: 6px;
+            transition: box-shadow .15s, transform .15s;
+        }
+        .node-tile:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
+        .node-tile .tile-top { display: flex; align-items: center; justify-content: space-between; }
+        .led-lg { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; }
+        .led-lg.good { background: var(--good); box-shadow: 0 0 0 4px var(--good-bg); }
+        .led-lg.warn { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-bg); }
+        .led-lg.critical { background: var(--critical); box-shadow: 0 0 0 4px var(--critical-bg); }
+        .node-tile .tile-state { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; }
+        .node-tile.good .tile-state { color: var(--good); }
+        .node-tile.warn .tile-state { color: var(--warn); }
+        .node-tile.critical .tile-state { color: var(--critical); }
+        .node-tile .tile-name { font-weight: 700; font-size: 12px; word-break: break-word; line-height: 1.25; }
+        .node-tile .tile-desc { font-size: 10px; color: var(--muted); line-height: 1.3; }
+
+        /* vision / rviz side-by-side */
+        .split-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .split-row .placeholder-box { height: 220px; }
+        @media (max-width: 900px) { .split-row { grid-template-columns: 1fr; } }
+
+        table.hmi-table { width: 100%; border-collapse: collapse; font-size: 12.8px; }
+        table.hmi-table th {
+            text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+            color: var(--muted); padding: 0 10px 10px; font-weight: 700;
+        }
+        table.hmi-table td { padding: 9px 10px; border-top: 1px solid var(--line); }
+        table.hmi-table tr:hover td { background: var(--page); }
+        .badge-ok { background: var(--good-bg); color: var(--good); font-weight: 700; font-size: 11px; padding: 3px 10px; border-radius: 20px; }
+        .badge-no { background: var(--critical-bg); color: var(--critical); font-weight: 700; font-size: 11px; padding: 3px 10px; border-radius: 20px; }
+
+        .kv-table { border-collapse: collapse; }
+        .kv-table th { text-align: left; color: var(--ink-soft); font-weight: 600; padding: 8px 22px 8px 0; font-size: 12.8px; }
+        .kv-table td { padding: 8px 0; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 12.8px; }
+        .kv-table tr + tr th, .kv-table tr + tr td { border-top: 1px solid var(--line); }
+
+        .placeholder-box {
+            background: #171c26; color: #cfd6e6; border-radius: var(--radius); height: 280px;
+            display: flex; align-items: center; justify-content: center; font-size: 13px; letter-spacing: .01em;
+        }
+
+        textarea.hmi-input {
+            width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13.5px;
+            font-family: inherit; resize: vertical; margin-bottom: 14px;
+        }
+        .btn-hmi {
+            display: inline-flex; align-items: center; gap: 8px; border: none; border-radius: 10px;
+            padding: 10px 16px; font-weight: 700; font-size: 13px; background: var(--accent); color: #fff; cursor: pointer;
+        }
+        .btn-hmi:disabled { background: var(--line); color: var(--muted); cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<div class="app">
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="mark">R</div>
+            <div>
+                <div class="name">robot_ws HMI</div>
+                <div class="sub">m0609 pick &amp; place cell</div>
+            </div>
+        </div>
+
+        <div class="side-label">모니터링</div>
+        <button class="side-link active" id="dashboard-tab" data-bs-toggle="tab" data-bs-target="#dashboard" type="button" role="tab"><span class="ic">&#9635;</span>메인 대시보드</button>
+        <button class="side-link" id="stt-tts-tab" data-bs-toggle="tab" data-bs-target="#stt-tts" type="button" role="tab"><span class="ic">&#127908;</span>STT-TTS</button>
+        <button class="side-link" id="vision-tab" data-bs-toggle="tab" data-bs-target="#vision" type="button" role="tab"><span class="ic">&#128247;</span>Vision</button>
+        <button class="side-link" id="rl-tab" data-bs-toggle="tab" data-bs-target="#rl" type="button" role="tab"><span class="ic">&#8982;</span>RL / 장애물회피</button>
+
+        <div class="side-label">설정</div>
+        <button class="side-link" id="param-tab" data-bs-toggle="tab" data-bs-target="#param" type="button" role="tab"><span class="ic">&#9881;</span>Parameter 설정</button>
+        <button class="side-link" id="db-tab" data-bs-toggle="tab" data-bs-target="#db" type="button" role="tab"><span class="ic">&#128451;</span>DB (SQLite)</button>
+        <button class="side-link" id="robot-tab" data-bs-toggle="tab" data-bs-target="#robot" type="button" role="tab"><span class="ic">&#129302;</span>로봇 제어 설정</button>
+    </aside>
+
+    <main>
+        <div class="topbar">
+            <h1 id="page-title">메인 대시보드</h1>
+            <span class="clock" id="clock"></span>
+        </div>
+
+        <div class="tab-content" id="hmiTabsContent">
+
+            <!-- 메인 대시보드: pick_logger 요약은 실데이터, 노드 상태는 아직 자리만 -->
+            <div class="tab-pane fade show active panel" id="dashboard" role="tabpanel">
+                <div class="card">
+                    <h3>노드 상태</h3>
+                    <div class="note">
+                        &#9888;&nbsp;아직 실데이터 연동 전입니다. 노드 상태(실행중/에러)는 Flask가 직접 알 수 없고,
+                        <code>rclpy</code> 브릿지 노드를 별도로 만들어 <code>/safety/state</code> 등을 구독해야 합니다
+                        (hmi_bridge와 같은 원칙: Flask는 ROS를 직접 붙잡지 않음). 아래는 실제 노드 이름만 미리 배치한 자리입니다.
+                    </div>
+                    <div class="node-tiles" id="node-tiles">
+                        <div class="node-tile good">
+                            <div class="tile-top"><span class="led-lg good"></span><span class="tile-state">실행중</span></div>
+                            <div class="tile-name">brain_node</div>
+                            <div class="tile-desc">오케스트레이터</div>
+                        </div>
+                        <div class="node-tile good">
+                            <div class="tile-top"><span class="led-lg good"></span><span class="tile-state">실행중</span></div>
+                            <div class="tile-name">motion_node</div>
+                            <div class="tile-desc">로봇/그리퍼 제어</div>
+                        </div>
+                        <div class="node-tile good">
+                            <div class="tile-top"><span class="led-lg good"></span><span class="tile-state">실행중</span></div>
+                            <div class="tile-name">safety_monitor_node</div>
+                            <div class="tile-desc">안전 판단/하드정지</div>
+                        </div>
+                        <div class="node-tile good">
+                            <div class="tile-top"><span class="led-lg good"></span><span class="tile-state">실행중</span></div>
+                            <div class="tile-name">object_detection_node</div>
+                            <div class="tile-desc">YOLO + hand 감지</div>
+                        </div>
+                        <div class="node-tile good">
+                            <div class="tile-top"><span class="led-lg good"></span><span class="tile-state">실행중</span></div>
+                            <div class="tile-name">get_keyword_node</div>
+                            <div class="tile-desc">웨이크워드/STT/LLM</div>
+                        </div>
+                        <div class="node-tile good">
+                            <div class="tile-top"><span class="led-lg good"></span><span class="tile-state">실행중</span></div>
+                            <div class="tile-name">world_map_node</div>
+                            <div class="tile-desc">월드맵 스캔</div>
+                        </div>
+                        <div class="node-tile warn">
+                            <div class="tile-top"><span class="led-lg warn"></span><span class="tile-state">stub</span></div>
+                            <div class="tile-name">rl_avoidance_node</div>
+                            <div class="tile-desc">회피 정책 추론 (미구현)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>Vision &amp; RViz</h3>
+                    <div class="note">
+                        &#9888;&nbsp;아직 둘 다 미연동입니다. Vision은 object_detection_node가 MJPEG 등으로
+                        프레임을 흘려줘야 하고, RViz는 native Qt 앱이라 브라우저에 그대로 못 띄웁니다 — 아래
+                        설명 참고. 지금은 자리만 잡아둔 자리표시자입니다.
+                    </div>
+                    <div class="split-row">
+                        <div>
+                            <div class="card-label" style="font-size:11.5px; font-weight:700; color: var(--ink-soft); margin-bottom:8px;">Vision 피드</div>
+                            <div class="placeholder-box">카메라 피드 — 추후 연동</div>
+                        </div>
+                        <div>
+                            <div class="card-label" style="font-size:11.5px; font-weight:700; color: var(--ink-soft); margin-bottom:8px;">RViz / 3D 시뮬레이션</div>
+                            <div class="placeholder-box">3D 뷰 — 추후 연동 (아래 설명 참고)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="kpi-row">
+                    <div class="kpi"><div class="label">오늘 Pick 시도</div><div class="value" id="stat-total">–</div></div>
+                    <div class="kpi"><div class="label">오늘 Pick 성공</div><div class="value" id="stat-success">–</div></div>
+                    <div class="kpi"><div class="label">오늘 성공률</div><div class="value" id="stat-rate">–</div></div>
+                    <div class="kpi"><div class="label">DB 연결</div><div class="value small" id="stat-db-status">확인 중…</div></div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade panel" id="stt-tts" role="tabpanel">
+                <p class="lede">음성 인식(STT) 및 합성(TTS)</p>
+                <div class="note">
+                    &#9888;&nbsp;get_keyword_node/STT/TTS와 아직 연결 안 됨(오늘 할 일 목록의 STT-TTS DB 항목).
+                    지금은 UI 자리만 — 아래 입력은 아무 데도 전송되지 않습니다.
+                </div>
+                <div class="card">
+                    <h3>텍스트 입력/출력 테스트</h3>
+                    <textarea class="hmi-input" rows="3" placeholder="인식된 텍스트가 표시되거나, 합성할 텍스트를 입력하세요."></textarea>
+                    <button class="btn-hmi" disabled>음성 출력 (TTS) — 미구현</button>
+                </div>
+            </div>
+
+            <div class="tab-pane fade panel" id="vision" role="tabpanel">
+                <p class="lede">Vision 실시간 스트리밍</p>
+                <div class="note">
+                    &#9888;&nbsp;object_detection_node/RealSense 카메라 스트림을 아직 노출하지 않음.
+                    MJPEG 등으로 프레임을 웹에 흘려주는 엔드포인트가 object_detection 쪽에 추가돼야 함.
+                </div>
+                <div class="placeholder-box">카메라 피드 영역 — 추후 연동</div>
+            </div>
+
+            <div class="tab-pane fade panel" id="rl" role="tabpanel">
+                <p class="lede">RL / 장애물회피 상태</p>
+                <div class="note">
+                    &#9888;&nbsp;<code>rl_avoidance_node</code>는 아직 policy 로드/추론이 stub입니다(학습 loss/epoch
+                    곡선을 보여줄 실제 학습 루프가 없음). 대신 실제로 있는 <code>world_map_node</code>의 장애물
+                    클러스터(<code>/world_map/obstacles</code>) 상태를 보여주는 자리로 잡아둡니다.
+                </div>
+                <div class="kpi-row" style="grid-template-columns: repeat(2, 1fr); max-width: 560px;">
+                    <div class="kpi"><div class="label">최근 월드맵 장애물 클러스터</div><div class="value">–</div></div>
+                    <div class="kpi"><div class="label">rl_avoidance_node 상태</div><div class="value small" style="color:var(--warn);">policy stub</div></div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade panel" id="param" role="tabpanel">
+                <p class="lede">시스템 환경 변수 설정</p>
+                <div class="note">
+                    &#9888;&nbsp;지금은 <code>motion_node.py</code>에 하드코딩된 값을 읽기 전용으로만 보여줍니다.
+                    실시간 반영(ROS 파라미터 get/set)은 rclpy 브릿지 노드가 필요합니다.
+                </div>
+                <div class="card" style="max-width: 480px;">
+                    <table class="kv-table">
+                        <tr><th>VELOCITY / ACC</th><td>70 / 70</td></tr>
+                        <tr><th>grip_min_width_mm</th><td>30.0</td></tr>
+                        <tr><th>GET_TARGET_TIMEOUT</th><td>6.0s</td></tr>
+                        <tr><th>ACTION_RESULT_TIMEOUT_SEC</th><td>360.0s</td></tr>
+                    </table>
+                </div>
+            </div>
+
+            <div class="tab-pane fade panel" id="db" role="tabpanel">
+                <p class="lede">데이터베이스 관리 — pick_logger (SQLite)</p>
+                <div class="note ready">
+                    &#10003;&nbsp;<code>~/.ros/my_robot_pkg/pick_log.db</code>를 읽기 전용(WAL)으로 조회합니다 — 실제 데이터입니다.
+                </div>
+                <div class="card">
+                    <table class="hmi-table">
+                        <thead><tr><th>ID</th><th>시각</th><th>물체</th><th>시도</th><th>그리퍼폭(mm)</th><th>결과</th></tr></thead>
+                        <tbody id="pick-log-body">
+                            <tr><td colspan="6" style="color: var(--muted);">불러오는 중…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="tab-pane fade panel" id="robot" role="tabpanel">
+                <p class="lede">로봇 제어 설정</p>
+                <div class="note">
+                    &#9888;&nbsp;이 로봇(Doosan m0609)은 관절 PID가 아니라 DSR_ROBOT2 SDK의 movel/amovel(속도·가속도)
+                    단위로 제어됩니다 — 그래서 조인트별 PID 게인 폼 대신 실제로 쓰는 이동 파라미터를 보여줍니다.
+                    값 수정은 아직 미구현(읽기 전용).
+                </div>
+                <div class="card" style="max-width: 480px;">
+                    <table class="kv-table">
+                        <tr><th>이동 속도(VELOCITY)</th><td>70</td></tr>
+                        <tr><th>가속도(ACC)</th><td>70</td></tr>
+                        <tr><th>스캔 스윕 속도(SWEEP_VELOCITY)</th><td>30</td></tr>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function tick() {
+    const el = document.getElementById('clock');
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    el.textContent = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+tick(); setInterval(tick, 1000);
+
+// 사이드바 탭 전환 시 상단 타이틀 동기화 (버튼 텍스트에서 아이콘 span 뗀 나머지)
+document.querySelectorAll('.side-link').forEach(btn => {
+    btn.addEventListener('shown.bs.tab', () => {
+        document.getElementById('page-title').textContent = btn.textContent.trim();
+    });
+});
+
+async function loadDashboardSummary() {
+    try {
+        const res = await fetch('/api/db/summary');
+        const data = await res.json();
+        document.getElementById('stat-total').textContent = data.total ?? '–';
+        document.getElementById('stat-success').textContent = data.success ?? '–';
+        document.getElementById('stat-rate').textContent = data.success_rate != null ? data.success_rate + '%' : '–';
+        document.getElementById('stat-db-status').textContent = (data.total === 0 && data.success === 0) ? 'DB 비어있음/없음' : '연결됨';
+    } catch (e) {
+        document.getElementById('stat-db-status').textContent = '연결 실패';
+    }
+}
+
+async function loadPickAttempts() {
+    const tbody = document.getElementById('pick-log-body');
+    try {
+        const res = await fetch('/api/db/pick_attempts?limit=50');
+        const data = await res.json();
+        const rows = data.rows || [];
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="color: var(--muted);">기록 없음 (motion_node를 아직 안 띄웠거나 pick 시도가 없음)</td></tr>';
+            return;
+        }
+        tbody.innerHTML = '';
+        rows.forEach(function (r) {
+            const tr = document.createElement('tr');
+            const ts = new Date(r.ts * 1000).toLocaleString('ko-KR');
+            const cells = [r.id, ts, r.obj_label, r.attempt_no, r.gripper_width_mm];
+            cells.forEach(function (v) {
+                const td = document.createElement('td');
+                td.textContent = (v === null || v === undefined) ? '-' : v;
+                tr.appendChild(td);
+            });
+            const resultTd = document.createElement('td');
+            const span = document.createElement('span');
+            span.className = r.success ? 'badge-ok' : 'badge-no';
+            span.textContent = r.success ? '성공' : '실패';
+            resultTd.appendChild(span);
+            tr.appendChild(resultTd);
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="6" style="color: var(--critical);">불러오기 실패: ' + e + '</td></tr>';
+    }
+}
+
+loadDashboardSummary();
+loadPickAttempts();
+document.getElementById('db-tab').addEventListener('shown.bs.tab', loadPickAttempts);
+</script>
+</body>
+</html>
