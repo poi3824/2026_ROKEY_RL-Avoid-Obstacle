@@ -20,6 +20,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -31,6 +32,12 @@ HTTP_PORT = 8766
 JPEG_QUALITY = 70  # 0~100. 화질보다 지연시간/대역폭을 우선한다(모니터링 용도라 충분).
 STREAM_FPS_CAP = 20  # 프레임 재인코딩 부하를 줄이기 위한 상한 - 카메라 실제 fps와 무관.
 BOX_COLOR = (0, 220, 0)
+MASK_FILL_ALPHA = 0.35
+# 2026-07-10: ultralytics 기본 conf 임계값(0.25)을 그대로 쓰면 이 프로젝트의
+# 실제 탐지 기준(object_detection.yolo의 is_fully_visible=0.6, has_label=0.9 등)
+# 보다 훨씬 낮아서, 확신도 낮은 잡음 박스가 화면에 잔뜩 그려져 "임의로 만든 것
+# 처럼" 보였다(실기 확인). 프로젝트 전반의 "진짜 탐지" 기준에 맞춘다.
+YOLO_CONFIDENCE_THRESHOLD = 0.6
 
 
 class VisionBridge(Node):
@@ -93,22 +100,45 @@ class VisionBridge(Node):
             return frame
 
         annotated = frame.copy()
+        overlay = frame.copy()
+        drew_mask = False
+
         for res in results:
             names = res.names
             boxes = res.boxes
             if boxes is None:
                 continue
-            for box, score, label in zip(
+            # 2026-07-10: 이 프로젝트가 쓰는 모델은 detect 전용이 아니라 seg
+            # 모델이라 res.masks(폴리곤)가 같이 나온다 - object_detection.yolo의
+            # get_best_detection/_find_matching_mask_info와 동일하게, 인덱스가
+            # boxes와 1:1로 대응한다(ultralytics 표준 동작).
+            polys = res.masks.xy if res.masks is not None else None
+
+            for i, (box, score, label) in enumerate(zip(
                 boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist()
-            ):
+            )):
+                if score < YOLO_CONFIDENCE_THRESHOLD:
+                    continue
                 x1, y1, x2, y2 = map(int, box)
                 name = names.get(int(label), str(int(label)))
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, 2)
+
+                if polys is not None and i < len(polys) and len(polys[i]) > 0:
+                    pts = polys[i].astype(np.int32)
+                    cv2.fillPoly(overlay, [pts], BOX_COLOR)
+                    cv2.polylines(annotated, [pts], True, BOX_COLOR, 2)
+                    drew_mask = True
+                else:
+                    # detect 전용 모델이거나 이 박스만 마스크가 안 잡힌 경우 폴백.
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, 2)
+
                 label_text = f"{name} {score:.2f}"
                 cv2.putText(
                     annotated, label_text, (x1, max(12, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, BOX_COLOR, 1, cv2.LINE_AA,
                 )
+
+        if drew_mask:
+            annotated = cv2.addWeighted(overlay, MASK_FILL_ALPHA, annotated, 1 - MASK_FILL_ALPHA, 0)
         return annotated
 
     def get_latest_jpeg(self):
