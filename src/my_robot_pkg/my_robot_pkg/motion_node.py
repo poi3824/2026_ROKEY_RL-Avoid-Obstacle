@@ -99,7 +99,10 @@ dsr_node = rclpy.create_node("robot_control_node", namespace=ROBOT_ID)
 DR_init.__dsr__node = dsr_node
 
 try:
-    from DSR_ROBOT2 import amovel, movej, mwait, get_current_posx, posx, check_motion
+    from DSR_ROBOT2 import (
+        amovel, movej, mwait, get_current_posx, posx, check_motion,
+        amovej, get_current_posj, DR_BASE,
+    )
 except ImportError as e:
     print(f"Error importing DSR_ROBOT2: {e}")
     sys.exit()
@@ -183,6 +186,12 @@ class MotionNode(Node):
             amovel, movej, mwait, gripper, VELOCITY, ACC, stop,
             self.get_surface_z, self.get_target_pos, grip_min_width, self.pick_logger,
             check_motion, estop_event, hand_pause_event, dsr_lock,
+            # 2026-07-10: move_via_rl()/move_joint() 전용 (dsr_policy_path 통합).
+            # get_current_posx는 ref=DR_BASE로 고정해서 넘긴다 — dsr_policy_path.py가
+            # "클라이언트 라이브러리의 _g_coord 기본값에 의존하지 말라"고 명시적으로
+            # 강조한 부분(세션 간 값이 남아있을 수 있음)을 그대로 지킨다.
+            amovej=amovej, get_current_posj=get_current_posj,
+            get_current_posx=lambda: get_current_posx(ref=DR_BASE),
         )
 
         # Action servers
@@ -390,7 +399,11 @@ class MotionNode(Node):
 
         result = Place.Result()
         try:
-            self.motion.place(target_pose, feedback_cb=send_feedback)
+            # 2026-07-10: RL 통합 첫 단계 — target 상단까지는 RL 정책으로 옮기고,
+            # 도착 지점에서 orientation만 재정렬한 뒤 끝난다. 실제 하강/그리퍼
+            # 개방("배치")은 RL 이동 자체의 신뢰성을 실기에서 검증한 뒤 이어붙인다
+            # (motion_executor.MotionExecutor.move_to_place_hover() docstring 참고).
+            reached = self.motion.move_to_place_hover(target_pose, feedback_cb=send_feedback)
         except EmergencyStop:
             goal_handle.abort()
             result.success = False
@@ -403,9 +416,12 @@ class MotionNode(Node):
             result.message = f"internal error: {e}"
             return result
 
-        goal_handle.succeed()
-        result.success = True
-        result.message = "placed"
+        result.success = bool(reached)
+        result.message = "target 상단 도달 (RL), 정렬 완료" if reached else "RL reach 실패 (목표 미도달)"
+        if reached:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
         return result
 
     # ---- 검출 / 좌표변환 (robot_action_node에서 이관) ----

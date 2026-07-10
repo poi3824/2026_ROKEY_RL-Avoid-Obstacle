@@ -4,6 +4,7 @@ log/
 
 # world_map_node 스캔 산출물 (point cloud/npy 등 바이너리, git으로 안 쫓음)
 data/
+data.zip
 
 # 비밀키 - 실수로도 커밋되면 안 됨 (OPENAI_API_KEY 등)
 **/.env

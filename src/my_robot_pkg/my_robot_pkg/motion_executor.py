@@ -17,6 +17,9 @@ import contextlib
 import time
 import copy
 
+import numpy as np
+from scipy.spatial.transform import Rotation
+
 _DR_STATE_IDLE = 0  # DSR_ROBOT2.DR_STATE_IDLE과 동일 (check_motion()이 이 값이면 정지 상태)
 MOTION_POLL_INTERVAL = 0.05  # check_motion() 폴링 간격(초)
 
@@ -30,6 +33,10 @@ PICK_HOVER_HEIGHT = 100.0  # depth를 읽을 안전 hover 높이(mm). source_pos
 # depth 측정값이 들쭉날쭉해도 이동 중 안전 높이 자체는 항상 일정하게 유지된다.
 PICK_RETRACT_Z = 460.0
 PICK_CLEARANCE = 10.0  # 물체 표면 위 여유 간격(mm)
+
+# 2026-07-10: move_via_rl()이 접근할 target 상단 안전 높이(mm) — PICK_HOVER_HEIGHT/
+# PICK_RETRACT_Z와 대칭. target_pos 그대로가 아니라 이만큼 띄운 지점을 RL의 목표로 준다.
+PLACE_HOVER_HEIGHT = 100.0
 
 DEFAULT_GRIP_MIN_WIDTH = 30.0  # mm. 통이 바뀌면 이 fallback이 아니라 robot_action_node의
                                 # ~grip_min_width_mm 파라미터를 바꿔서 대응한다 (재빌드 불필요).
@@ -64,11 +71,17 @@ class MotionExecutor:
         self, movel, movej, mwait, gripper, velocity, acc, stop,
         get_surface_z=None, redetect=None, grip_min_width=None, logger=None,
         check_motion=None, estop_event=None, hand_pause_event=None,
-        dsr_lock=None,
+        dsr_lock=None, amovej=None, get_current_posj=None, get_current_posx=None,
     ):
         self._movel = movel  # amovel을 주입받는다 (위 모듈 주석 참고)
         self._movej = movej
         self._mwait = mwait
+        # 2026-07-10: move_via_rl()/move_joint() 전용 — dsr_policy_path 통합을 위해 추가.
+        # amovej는 amovel의 조인트 스페이스 버전(vendor SDK에 존재 확인), get_current_posj/x는
+        # 매 스텝 실제 상태를 읽어 정책에 넣거나 수렴 여부를 판단하는 데 쓴다.
+        self._amovej = amovej
+        self._get_current_posj = get_current_posj
+        self._get_current_posx = get_current_posx
         self.gripper = gripper
         self.velocity = velocity
         self.acc = acc
@@ -92,19 +105,22 @@ class MotionExecutor:
         # 막기 위해 이 락으로 감싼다.
         self._dsr_lock = dsr_lock if dsr_lock is not None else contextlib.nullcontext()
 
-    def _handle_interrupts(self, posx, velocity, acc):
+    def _handle_interrupts(self, pos, velocity, acc, reissue=None):
         """이동 폴링 도중 응급정지/손 감지 일시정지를 처리한다.
 
-        move_linear와 sweep_to_detect가 공유하는 헬퍼다.
+        move_linear/move_joint/sweep_to_detect가 공유하는 헬퍼다. reissue는 재개 시
+        큐잉할 함수(기본 self._movel) — move_joint()는 self._amovej를 넘겨서 조인트
+        스페이스 이동도 같은 방식으로 정지/재개되게 한다.
 
         2026-07-09: 응급정지도 손 감지 일시정지와 똑같이 "그 자리에서 홀드 후
         재개" 방식으로 바뀌었다(이전엔 액션 자체를 중단시켰는데, 사용자가 "정지"
         후 "다시 시작해"라고 하면 하던 동작을 그대로 이어가길 원해서 바꿈).
         safety_monitor의 ESTOP_STOP_MODE가 HOLD(서보 토크 유지)로 바뀐 덕에,
-        정지 뒤에도 같은 posx로 movel을 다시 issue하는 것만으로 이동을 이어갈
-        수 있다. 응급정지/손 일시정지 둘 다 같은 방식이라 하나로 합쳤다 —
+        정지 뒤에도 같은 목적지로 movel/movej를 다시 issue하는 것만으로 이동을
+        이어갈 수 있다. 응급정지/손 일시정지 둘 다 같은 방식이라 하나로 합쳤다 —
         둘 중 하나라도 활성 상태면 멈추고, 둘 다 풀릴 때까지 기다렸다가 재개한다.
         """
+        reissue = self._movel if reissue is None else reissue
         estop_active = self._estop_event is not None and self._estop_event.is_set()
         hand_active = self._hand_pause_event is not None and self._hand_pause_event.is_set()
         if not (estop_active or hand_active):
@@ -119,8 +135,8 @@ class MotionExecutor:
             time.sleep(MOTION_POLL_INTERVAL)
 
         with self._dsr_lock:
-            self._movel(posx, velocity, acc)  # 같은 목적지로 재개
-        # 재개도 amovel 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
+            reissue(pos, velocity, acc)  # 같은 목적지로 재개
+        # 재개도 amovel/amovej 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
         time.sleep(MOTION_START_SETTLE_SEC)
 
     def move_linear(self, posx):
@@ -157,10 +173,30 @@ class MotionExecutor:
         if self._estop_event is not None and self._estop_event.is_set():
             raise EmergencyStop("이동 중 응급 정지 감지")
 
-    def _poll_until_idle(self, posx):
+    def move_joint(self, posj):
+        """amovej로 이동 명령을 큐잉하고, check_motion()을 폴링하며 완료를 기다린다.
+
+        move_linear()의 조인트 스페이스 버전 — 이중 폴링(stale-idle 방어)과
+        손 감지/응급정지 처리(_handle_interrupts, reissue=amovej)까지 완전히 동일한
+        구조다. move_via_rl()이 매 스텝 이걸 호출한다(2026-07-10).
+        """
+        with self._dsr_lock:
+            self._amovej(posj, self.velocity, self.acc)
+
+        if self._check_motion is None:
+            self._mwait()
+            return
+
+        self._poll_until_idle(posj, reissue=self._amovej)
+        self._poll_until_idle(posj, reissue=self._amovej)
+
+        if self._estop_event is not None and self._estop_event.is_set():
+            raise EmergencyStop("이동 중 응급 정지 감지")
+
+    def _poll_until_idle(self, pos, reissue=None):
         """check_motion()이 IDLE을 보고할 때까지 폴링하며, 매 주기 _handle_interrupts()로
-        손 감지 일시정지/응급 정지를 처리한다. move_linear()가 이 함수를 연달아 두 번
-        호출해서 stale-idle 오탐을 잡는다(move_linear() docstring 참고).
+        손 감지 일시정지/응급 정지를 처리한다. move_linear()/move_joint()가 이 함수를
+        연달아 두 번 호출해서 stale-idle 오탐을 잡는다(move_linear() docstring 참고).
         """
         time.sleep(MOTION_START_SETTLE_SEC)
         while True:
@@ -169,7 +205,7 @@ class MotionExecutor:
             if motion_state == _DR_STATE_IDLE:
                 return
 
-            self._handle_interrupts(posx, self.velocity, self.acc)
+            self._handle_interrupts(pos, self.velocity, self.acc, reissue=reissue)
             time.sleep(MOTION_POLL_INTERVAL)
 
     def sweep_to_detect(self, pose_a, pose_b, is_visible_cb,
@@ -349,6 +385,119 @@ class MotionExecutor:
         self.gripper.open_gripper()
         self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
         self.move_linear(target_pos)
+
+    def move_via_rl(self, target_pos, max_steps=None, goal_threshold_m=None):
+        """dsr_policy_path의 학습된 reach 정책으로 현재 자세에서 target_pos(x,y,z, mm,
+        base frame)까지 movej 스텝을 반복해 이동한다(2026-07-10).
+
+        원본 dsr_policy_path.run_policy_live()와 달리 DEFAULT_JOINT_POS로 리셋하는
+        첫 스텝이 없다 — pick 직후 hover/후퇴 자세에서 바로 시작한다(이 체크포인트는
+        reset_joints_from_ik_table로 다양한 시작 자세를 학습했다는 근거로 생략했지만,
+        실기에서 직접 검증된 가정은 아니다 — 첫 테스트에서 눈여겨볼 지점).
+
+        매 스텝이 move_joint()를 거치므로 손 감지/응급정지가 스텝 단위로 반응한다 —
+        스텝 하나의 관절 이동폭만큼은 못 끊는다. 이 체크포인트는 장애물 회피를 학습
+        하지 않았다(dsr_policy_path 모듈 docstring 캐비어트 1) — 지금은 RL 통합 자체의
+        신뢰성부터 검증하는 단계로 진행한다.
+
+        target_pos의 orientation(rx,ry,rz)은 정책이 무시한다(캐비어트 4) — x,y,z만 쓴다.
+
+        Returns:
+            bool: goal_threshold_m 이내로 수렴하면 True, max_steps 안에 못 하면(또는
+            관절 한계 세이프티로 중단되면) False.
+        """
+        from my_robot_pkg import dsr_policy_path as rl  # 첫 호출까지 torch/체크포인트 로드를 늦춘다
+
+        max_steps = rl.MAX_STEPS if max_steps is None else max_steps
+        goal_threshold_m = rl.GOAL_POS_THRESHOLD_M if goal_threshold_m is None else goal_threshold_m
+        # 2026-07-10 버그 수정: target_pos는 이 코드베이스의 다른 모든 곳(move_linear 등)과
+        # 동일하게 FLANGE 기준 pose다 — RG2 TCP는 195mm 오프셋만큼 떨어져 있는데(모듈
+        # 상단 주석 참고), 그걸 안 거치고 target_pos[:3]를 그대로 정책의 목표 TCP
+        # 위치로 썼었다. 그러면 policy_step()의 pos_err 계산(TCP 위치 vs target_pos_m)이
+        # 애초에 도달 불가능한 목표를 기준으로 계산돼 절대 수렴하지 않는다(실기에서
+        # pos_err가 25.4cm 근처에 멈춰 안 줄어드는 것으로 확인됨 — flange_posx_to_tcp_pos_m
+        # 없이 direct offset을 썼을 때의 오차와 방향이 일치). target_pos의 orientation을
+        # 그대로 써서(_align_tcp_vertical과 동일한 함수) 실제 TCP가 도달해야 할 지점을 구한다.
+        target_pos_m = rl.flange_posx_to_tcp_pos_m(target_pos)
+
+        prev_action = np.zeros(6, dtype=np.float32)
+        for step in range(max_steps):
+            with self._dsr_lock:
+                current_posj_deg = self._get_current_posj()
+
+            target_joint_pos_deg, prev_action, diag = rl.policy_step(
+                current_posj_deg, target_pos_m, prev_action
+            )
+
+            ok, worst = rl.check_joint_limit_safety(target_joint_pos_deg)
+            if not ok:
+                print(
+                    f"[MotionExecutor] RL reach 중단: joint_{worst + 1} 목표가 물리 한계 "
+                    f"안전마진 안으로 들어옴 ({step}스텝째)"
+                )
+                return False
+
+            self.move_joint(target_joint_pos_deg)
+
+            with self._dsr_lock:
+                flange_posx = self._get_current_posx()[0]
+            tcp_pos_m = rl.flange_posx_to_tcp_pos_m(flange_posx)
+            pos_err_m = float(np.linalg.norm(tcp_pos_m - target_pos_m))
+            print(
+                f"[MotionExecutor] RL reach step {step}: pos_err={pos_err_m * 100:.1f}cm "
+                f"(raw_action_norm={diag['raw_action_norm']:.3f})"
+            )
+
+            if pos_err_m < goal_threshold_m:
+                print(f"[MotionExecutor] RL reach 목표 도달 ({step + 1}스텝, {pos_err_m * 100:.1f}cm)")
+                return True
+
+        print(f"[MotionExecutor] RL reach: max_steps({max_steps}) 도달, 목표 미도달")
+        return False
+
+    def _align_tcp_vertical(self, target_orientation):
+        """move_via_rl()이 멈춘 자리에서 TCP 위치는 고정한 채 orientation만
+        target_orientation(ZYZ euler, deg)으로 맞춘다(2026-07-10).
+
+        dsr_policy_path의 정책은 orientation을 학습 보상(tcp_axis_alignment)으로만
+        느슨하게 맞추므로(캐비어트 4), move_via_rl() 도착 시 TCP가 살짝 기울어 있을 수
+        있다. 이후 하강/배치 단계가 정확한 자세에서 시작하도록 여기서 한 번 정렬한다 —
+        TCP 위치(제자리)는 그대로 두고 orientation만 바꾸는 피벗이라, move_linear() 하나로
+        처리할 수 있다.
+        """
+        from my_robot_pkg import dsr_policy_path as rl
+
+        with self._dsr_lock:
+            current_flange_posx = self._get_current_posx()[0]
+        tcp_pos_m = rl.flange_posx_to_tcp_pos_m(current_flange_posx)
+
+        r_new = Rotation.from_euler("ZYZ", target_orientation, degrees=True)
+        flange_pos_m = tcp_pos_m - r_new.apply(rl.FLANGE_TO_TCP_OFFSET_M)
+        new_posx = list(flange_pos_m * 1000.0) + list(target_orientation)
+
+        self.move_linear(new_posx)
+
+    def move_to_place_hover(self, target_pos, feedback_cb=None):
+        """pick 직후 hover 자세에서 RL 정책으로 target_pos 상단까지 옮기고, 도착
+        지점에서 orientation을 target_pos의 배치 각도로 재정렬한다(2026-07-10).
+
+        RL 통합 첫 단계 — 실제 하강/그리퍼 개방("place")은 이번 단계에 포함하지
+        않는다. RL 이동 자체의 신뢰성부터 실기에서 검증한 뒤 이어붙인다.
+
+        Returns:
+            bool: RL이 목표에 수렴하면 True(정렬까지 완료), 못 하면 False(정렬은 생략).
+        """
+        hover_pos = target_pos[:2] + [target_pos[2] + PLACE_HOVER_HEIGHT] + target_pos[3:]
+
+        if feedback_cb:
+            feedback_cb("rl_transit")
+        if not self.move_via_rl(hover_pos):
+            return False
+
+        if feedback_cb:
+            feedback_cb("aligning")
+        self._align_tcp_vertical(target_pos[3:6])
+        return True
 
     def apply_avoidance_cmd(self, cmd):
         """rl_avoidance_node가 보내는 /avoidance_cmd(topic)를 받아 실시간으로
