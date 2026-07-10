@@ -202,6 +202,9 @@
         .subpanel { display: none; }
         .subpanel.show { display: block; }
 
+        .hmi-table a { color: var(--accent); font-weight: 600; text-decoration: none; }
+        .hmi-table a:hover { text-decoration: underline; }
+
         .log-box {
             background: #10141b; border-radius: 10px; padding: 10px 14px; height: 260px;
             overflow-y: auto; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px;
@@ -442,8 +445,8 @@
                 <div class="subpanel" id="db-world">
                     <div class="note ready">
                         &#10003;&nbsp;DB가 아니라 <code>data/world_maps/</code> 디렉토리를 직접 읽어 나열합니다 —
-                        point cloud 파일은 SQL에 넣을 데이터가 아니라서 그대로 파일로 둡니다. 3D로 보려면
-                        hmi_bridge(월드맵 뷰어)를 따로 여세요.
+                        point cloud 파일은 SQL에 넣을 데이터가 아니라서 그대로 파일로 둡니다. scan_id를 클릭하면
+                        아래에 hmi_bridge 3D 뷰어가 해당 스캔으로 뜹니다.
                     </div>
                     <div class="card">
                         <table class="hmi-table">
@@ -452,6 +455,10 @@
                                 <tr><td colspan="3" style="color: var(--muted);">불러오는 중…</td></tr>
                             </tbody>
                         </table>
+                    </div>
+                    <div class="card" id="worldmap-viewer-card" style="display: none;">
+                        <h3>월드맵 뷰어 — <span id="worldmap-viewer-title"></span></h3>
+                        <iframe id="worldmap-viewer-frame" style="width:100%; height:520px; border:0; border-radius:8px; background:#111;"></iframe>
                     </div>
                 </div>
             </div>
@@ -661,7 +668,19 @@ async function loadWorldmapScans() {
         tbody.innerHTML = '';
         rows.forEach(function (r) {
             const tr = document.createElement('tr');
-            [r.scan_id, r.timestamp, r.cluster_count].forEach(function (v) {
+
+            const scanTd = document.createElement('td');
+            const scanLink = document.createElement('a');
+            scanLink.href = '#';
+            scanLink.textContent = r.scan_id;
+            scanLink.onclick = function (ev) {
+                ev.preventDefault();
+                openWorldMapViewer(r.scan_id);
+            };
+            scanTd.appendChild(scanLink);
+            tr.appendChild(scanTd);
+
+            [r.timestamp, r.cluster_count].forEach(function (v) {
                 const td = document.createElement('td');
                 td.textContent = (v === null || v === undefined) ? '-' : v;
                 tr.appendChild(td);
@@ -671,6 +690,19 @@ async function loadWorldmapScans() {
     } catch (e) {
         tbody.innerHTML = '<tr><td colspan="3" style="color: var(--critical);">불러오기 실패: ' + e + '</td></tr>';
     }
+}
+
+// hmi_bridge(월드맵 3D 뷰어)는 별개 패키지/포트(5000)의 Flask 앱 — hmi_interface가
+// 직접 렌더링하지 않고 iframe으로 그대로 띄운다. world_map_viewer.js가 ?scan= 쿼리
+// 파라미터를 읽어 해당 scan을 바로 선택하도록 되어 있다.
+const WORLDMAP_BRIDGE_PORT = 5000;
+function openWorldMapViewer(scanId) {
+    const card = document.getElementById('worldmap-viewer-card');
+    const frame = document.getElementById('worldmap-viewer-frame');
+    document.getElementById('worldmap-viewer-title').textContent = scanId;
+    frame.src = `http://${location.hostname}:${WORLDMAP_BRIDGE_PORT}/?scan=${encodeURIComponent(scanId)}`;
+    card.style.display = '';
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 // DB 탭 안의 서브탭(로봇로그/STT/월드) 전환 - 메인 사이드바 탭과 같은 순수 JS 패턴
