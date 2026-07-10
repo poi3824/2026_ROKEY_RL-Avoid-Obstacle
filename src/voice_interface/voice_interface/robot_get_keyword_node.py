@@ -14,7 +14,7 @@ from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate  # d2 이거를 langchain_core로 바꿈
 # from langchain.chains import LLMChain
 
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import Bool, String, Float32
 from voice_interface.MicController import MicController, MicConfig
 
@@ -59,6 +59,11 @@ VOICE_ESTOP_TOPIC = "/voice/estop"
 # ROS를 직접 붙잡지 않는다는 원칙도 그대로 유지된다.
 VOICE_STATE_TOPIC = "/voice/state"    # "idle" | "recording" | "processing" | "speaking"
 VOICE_LEVEL_TOPIC = "/voice/level"    # Float32, 0.0~1.0 정규화 RMS
+
+# 2026-07-10: HMI STT-TTS 탭의 수동 녹음 토글 버튼용 서비스. data=True로 부르면
+# 웨이크워드 없이 바로 녹음 세션을 시작하고(수동 트리거), data=False로 부르면
+# 지금 도는 녹음을 그 자리에서 끊고 그때까지 녹음된 것만 전사한다(수동 중지).
+VOICE_MANUAL_RECORD_SERVICE = "/voice/manual_record"
 
 # STT 텍스트에 이 단어가 있으면 LLM 왕복을 기다리지 않고 바로 응급정지를 호출한다.
 # STOP은 안전(즉시성)이 최우선이라 로컬 문자열 매칭으로 처리한다.
@@ -355,6 +360,11 @@ RESUME / RESUME / RESUME / RESUME
         self.voice_level_pub = self.create_publisher(Float32, VOICE_LEVEL_TOPIC, 10)
         self._last_published_state = None
 
+        # 2026-07-10: HMI 수동 녹음 버튼. VOICE_MANUAL_RECORD_SERVICE 주석 참고.
+        self._manual_trigger = threading.Event()  # 세팅되면 웨이크워드 없이 세션 시작
+        self._manual_stop = threading.Event()     # 세팅되면 진행 중인 녹음을 즉시 종료
+        self.create_service(SetBool, VOICE_MANUAL_RECORD_SERVICE, self._on_manual_record)
+
         # 2026-07-09: RESUME("다시 시작해")도 STOP처럼 brain_node를 거치지 않고
         # 여기서 바로 처리한다. ESTOP이 이제 액션을 중단시키지 않고 그 자리에서
         # 대기만 하는 구조라(motion_executor._handle_interrupts), brain_node의
@@ -445,18 +455,36 @@ RESUME / RESUME / RESUME / RESUME
             # 2026-07-10: 웨이크워드 대기 중에도 HMI 오브가 주변 소리에 반응하도록
             # is_wakeup()이 매 청크마다 갱신해둔 레벨을 그대로 흘려보낸다.
             self._publish_voice_level(self.wakeup_word.last_level)
+
+            # 2026-07-10: HMI 수동 녹음 버튼 - 웨이크워드 대신 이 이벤트로도 세션을
+            # 시작할 수 있다("헬로우 로키" 안 해도 버튼만 누르면 됨).
+            manual_start = self._manual_trigger.is_set()
+            if manual_start:
+                self._manual_trigger.clear()
+                woke = True
+
             if not woke:
                 continue
 
-            self.get_logger().info("헬로우 로키 감지 - 녹음 시작")
+            self.get_logger().info(
+                "HMI 수동 녹음 버튼으로 세션 시작" if manual_start else "헬로우 로키 감지 - 녹음 시작"
+            )
 
             # 웨이크워드 세션: MAX_SESSION_SEC 동안은 재웨이크 없이 계속 듣는다.
+            # self._manual_stop이 세팅되면(HMI 버튼으로 "중지") 그 즉시 세션도 끝낸다.
             session_start = time.time()
-            while rclpy.ok() and (time.time() - session_start) < MAX_SESSION_SEC:
+            while (
+                rclpy.ok()
+                and (time.time() - session_start) < MAX_SESSION_SEC
+                and not self._manual_stop.is_set()
+            ):
                 # STT --> Keyword Extract --> Embedding
                 self._publish_voice_state("recording")
                 with self._audio_lock:
-                    output_message = self.stt.speech2text(level_callback=self._publish_voice_level)
+                    output_message = self.stt.speech2text(
+                        level_callback=self._publish_voice_level,
+                        stop_event=self._manual_stop,
+                    )
                 self._flush_mic_stream()
                 self.get_logger().info(f"STT 인식 결과: '{output_message}'")
 
@@ -523,6 +551,9 @@ RESUME / RESUME / RESUME / RESUME
                 self._command_ready.set()
                 break  # 유효한 명령 하나 처리했으니 세션 종료 — 다음 명령은 재웨이크 필요
 
+            # 세션이 manual_stop 때문에 끝났을 수 있으니 다음 세션을 위해 반드시 클리어.
+            # (여기서 안 지우면 다음 while 조건 검사에서 바로 걸려 세션이 0회 반복으로 끝남)
+            self._manual_stop.clear()
             self._publish_voice_state("idle")
 
             # 2026-07-08: 세션 루프 안에서 speech2text() 직후에 한 번 플러시해도,
@@ -568,6 +599,17 @@ RESUME / RESUME / RESUME / RESUME
 
     def _publish_voice_level(self, level):
         self.voice_level_pub.publish(Float32(data=float(level)))
+
+    def _on_manual_record(self, request, response):
+        """HMI의 수동 녹음 버튼. request.data=True면 트리거, False면 중지."""
+        if request.data:
+            self._manual_trigger.set()
+            response.message = "manual recording session requested"
+        else:
+            self._manual_stop.set()
+            response.message = "manual stop requested"
+        response.success = True
+        return response
 
     def _call_emergency_stop(self):
         """2026-07-07: /voice/estop 토픽에 True를 발행한다 (fire-and-forget).

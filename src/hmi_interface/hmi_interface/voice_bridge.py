@@ -8,30 +8,54 @@
 # 경로에 아예 관여하지 않는다.
 import asyncio
 import json
+import signal
 import threading
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Float32
+from std_srvs.srv import SetBool
 
 import websockets
 
 VOICE_STATE_TOPIC = "/voice/state"
 VOICE_LEVEL_TOPIC = "/voice/level"
+VOICE_MANUAL_RECORD_SERVICE = "/voice/manual_record"
 WS_HOST = "0.0.0.0"
 WS_PORT = 8765
 
 
 class VoiceBridge(Node):
-    def __init__(self, loop, clients):
+    def __init__(self, loop, ws_clients):
         super().__init__("hmi_voice_bridge")
         self._loop = loop
-        self._clients = clients
+        # 2026-07-10 버그 수정: rclpy.node.Node가 내부적으로 서비스 클라이언트
+        # 목록을 self._clients(리스트)로 관리한다 - 여기서 같은 이름을 쓰면
+        # __init__에서 그걸 덮어써서, 이후 spin/destroy_node가 ROS Client 객체인
+        # 줄 알고 이 안의 websocket 객체에 접근하다 죽는다(실기로 확인:
+        # AttributeError: 'ServerConnection' object has no attribute 'handle').
+        # Node의 내부 속성과 절대 겹치지 않도록 접두어를 붙인다.
+        self._ws_clients = ws_clients
         self._state = "idle"
         self._level = 0.0
 
         self.create_subscription(String, VOICE_STATE_TOPIC, self._on_state, 10)
         self.create_subscription(Float32, VOICE_LEVEL_TOPIC, self._on_level, 10)
+
+        # 2026-07-10: HMI 수동 녹음 토글 버튼 - 브라우저 -> 이 노드(websocket
+        # 수신) -> get_keyword_node(서비스 호출) 방향. Flask는 여전히 이 경로에
+        # 관여하지 않는다(브라우저가 이 노드의 websocket에 직접 붙어서 명령을 보냄).
+        self._manual_record_client = self.create_client(SetBool, VOICE_MANUAL_RECORD_SERVICE)
+
+    def request_manual_record(self, start):
+        if not self._manual_record_client.service_is_ready():
+            self.get_logger().warn(
+                f"{VOICE_MANUAL_RECORD_SERVICE} 서비스 없음 - get_keyword_node가 안 떠 있는 듯"
+            )
+            return
+        req = SetBool.Request()
+        req.data = start
+        self._manual_record_client.call_async(req)  # fire-and-forget - 결과는 /voice/state로 확인됨
 
     def _on_state(self, msg):
         self._state = msg.data
@@ -45,7 +69,7 @@ class VoiceBridge(Node):
         payload = json.dumps({"state": self._state, "level": self._level})
         # rclpy 콜백은 ROS spin 스레드에서 도는데, websocket 전송은 asyncio
         # 이벤트루프(별도 스레드) 소관이라 스레드 안전하게 넘겨준다.
-        asyncio.run_coroutine_threadsafe(_send_all(self._clients, payload), self._loop)
+        asyncio.run_coroutine_threadsafe(_send_all(self._ws_clients, payload), self._loop)
 
 
 async def _send_all(clients, payload):
@@ -59,12 +83,22 @@ async def _send_all(clients, payload):
         clients.discard(ws)
 
 
-async def _handler(websocket, clients):
+async def _handler(websocket, clients, node):
     clients.add(websocket)
     try:
-        # 이 채널은 서버(ROS)->브라우저 단방향이라 클라이언트가 보내는 건 그냥 버린다.
-        async for _ in websocket:
-            pass
+        # 2026-07-10: 수동 녹음 버튼 추가 전엔 이 채널이 서버->브라우저 단방향이라
+        # 들어오는 메시지를 그냥 버렸다. 이제 {"cmd": "start_record"|"stop_record"}를
+        # 받아 get_keyword_node의 서비스를 호출한다(node.request_manual_record).
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+            except (ValueError, TypeError):
+                continue
+            cmd = data.get("cmd")
+            if cmd == "start_record":
+                node.request_manual_record(True)
+            elif cmd == "stop_record":
+                node.request_manual_record(False)
     finally:
         clients.discard(websocket)
 
@@ -74,21 +108,32 @@ def main():
 
     clients = set()
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     node = VoiceBridge(loop, clients)
 
     ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     ros_thread.start()
 
-    async def _serve():
-        async with websockets.serve(lambda ws: _handler(ws, clients), WS_HOST, WS_PORT):
-            node.get_logger().info(f"voice_bridge websocket 서버 시작: ws://{WS_HOST}:{WS_PORT}")
-            await asyncio.Future()  # 영구 실행
+    # 2026-07-10: bare KeyboardInterrupt에 기대면(try/except) Ctrl+C가 asyncio의
+    # C 레벨 select 대기 도중 들어와서 "terminate called without an active
+    # exception" / Aborted로 지저분하게 죽는 걸 실기로 확인했다. asyncio
+    # 시그널 핸들러로 루프 내부에서 정지 신호를 받아 깔끔하게 빠져나가게 한다.
+    stop_event = loop.create_future()
 
-    asyncio.set_event_loop(loop)
+    def _request_stop():
+        if not stop_event.done():
+            stop_event.set_result(None)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _request_stop)
+
+    async def _serve():
+        async with websockets.serve(lambda ws: _handler(ws, clients, node), WS_HOST, WS_PORT):
+            node.get_logger().info(f"voice_bridge websocket 서버 시작: ws://{WS_HOST}:{WS_PORT}")
+            await stop_event
+
     try:
         loop.run_until_complete(_serve())
-    except KeyboardInterrupt:
-        pass
     finally:
         node.destroy_node()
         if rclpy.ok():

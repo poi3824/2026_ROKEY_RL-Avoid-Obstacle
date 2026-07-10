@@ -17,7 +17,7 @@ class STT:
         self.duration = 5  # seconds
         self.samplerate = 16000  # Whisper는 16kHz를 선호
 
-    def speech2text(self, level_callback=None):
+    def speech2text(self, level_callback=None, stop_event=None):
         """5초간 녹음해 Whisper로 전사한다.
 
         2026-07-10: 이전엔 sd.rec()로 5초를 통째로 블로킹 녹음해서 녹음 도중의
@@ -25,6 +25,10 @@ class STT:
         움직이려면 이게 필요함). sd.InputStream 콜백 방식으로 바꿔서, 매 블록
         (약 100ms)마다 level_callback(0.0~1.0)을 호출할 수 있게 한다.
         level_callback이 None이면(기존 호출부 호환) 그냥 조용히 녹음만 한다.
+
+        stop_event(threading.Event)가 세팅되면 5초를 다 안 채우고 그 시점까지
+        녹음된 것만으로 바로 전사한다 - HMI의 수동 녹음 버튼으로 "중지"를 누른
+        경우에 쓴다.
         """
         # ros2 launch는 자식 프로세스 stdout을 파이프로 연결하는데, 그러면 파이썬
         # print()가 tty에 붙었을 때와 달리 완전 버퍼링돼서 바로 안 나오고 한참
@@ -48,6 +52,8 @@ class STT:
         ):
             start = time.time()
             while time.time() - start < self.duration:
+                if stop_event is not None and stop_event.is_set():
+                    break
                 try:
                     block = block_q.get(timeout=0.2)
                 except queue.Empty:

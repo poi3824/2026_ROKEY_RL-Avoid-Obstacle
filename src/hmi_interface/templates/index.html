@@ -187,6 +187,8 @@
             display: flex; align-items: center; gap: 8px;
         }
         .orb-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--orb-color, var(--muted)); }
+        .record-btn { margin-top: 4px; min-width: 150px; justify-content: center; }
+        .record-btn.is-recording { background: var(--critical); }
     </style>
 </head>
 <body>
@@ -313,6 +315,7 @@
                             <div class="orb-core" id="orb-core"></div>
                         </div>
                         <div class="orb-state" id="orb-state">대기 중</div>
+                        <button class="btn-hmi record-btn" id="record-btn" type="button">&#127908;&nbsp;녹음 시작</button>
                     </div>
                 </div>
             </div>
@@ -485,16 +488,31 @@ loadPickAttempts();
     const stateEl = document.getElementById('orb-state');
     const statusEl = document.getElementById('voice-ws-status');
     const noteEl = document.getElementById('voice-ws-note');
+    const recordBtn = document.getElementById('record-btn');
 
     let targetLevel = 0;
     let shownLevel = 0;
+    let currentState = 'idle';
+    let ws = null;
 
     function setState(state) {
+        currentState = state;
         const meta = STATE_META[state] || STATE_META.idle;
         document.documentElement.style.setProperty('--orb-color', meta.color);
         stateEl.innerHTML = '<span class="dot"></span>' + meta.label;
+
+        // 2026-07-10: 버튼 표시는 이 서버 state를 그대로 따른다(따로 상태를 안 들고
+        // 있음) - 웨이크워드("헬로우 로키")로 세션이 시작돼도 버튼이 항상 실제
+        // 상태와 일치하게 "녹음 중지"로 바뀐다.
+        recordBtn.classList.toggle('is-recording', state === 'recording');
+        recordBtn.textContent = state === 'recording' ? '⏹️ 녹음 중지' : '🎤 녹음 시작';
     }
     setState('idle');
+
+    recordBtn.addEventListener('click', () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ cmd: currentState === 'recording' ? 'stop_record' : 'start_record' }));
+    });
 
     // 60fps로 부드럽게 스케일 갱신 (websocket 메시지가 뚝뚝 끊겨 와도 안 튀도록 보간)
     function animate() {
@@ -511,7 +529,7 @@ loadPickAttempts();
 
     function connect() {
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-        const ws = new WebSocket(`${proto}://${location.hostname}:${WS_PORT}`);
+        ws = new WebSocket(`${proto}://${location.hostname}:${WS_PORT}`);
 
         ws.onopen = () => {
             statusEl.textContent = 'hmi_voice_bridge 연결됨 — 실제 로봇 마이크 상태 표시 중';
