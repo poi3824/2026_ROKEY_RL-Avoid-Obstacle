@@ -191,6 +191,17 @@
         .record-btn.is-recording { background: var(--critical); }
         .btn-hmi.is-on { background: var(--good); }
 
+        /* DB 탭 내부 서브탭 (로봇로그/STT/월드) */
+        .subtabs { display: flex; gap: 6px; margin-bottom: 16px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+        .subtab-btn {
+            border: none; background: var(--surface-2, var(--page)); color: var(--ink-soft);
+            font-size: 12.5px; font-weight: 700; padding: 7px 14px; border-radius: 20px; cursor: pointer;
+        }
+        .subtab-btn:hover:not(.active) { background: var(--line); }
+        .subtab-btn.active { background: var(--accent); color: #fff; }
+        .subpanel { display: none; }
+        .subpanel.show { display: block; }
+
         .log-box {
             background: #10141b; border-radius: 10px; padding: 10px 14px; height: 260px;
             overflow-y: auto; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px;
@@ -392,17 +403,56 @@
             </div>
 
             <div class="panel" id="db">
-                <p class="lede">데이터베이스 관리 — pick_logger (SQLite)</p>
-                <div class="note ready">
-                    &#10003;&nbsp;<code>~/.ros/my_robot_pkg/pick_log.db</code>를 읽기 전용(WAL)으로 조회합니다 — 실제 데이터입니다.
+                <p class="lede">데이터베이스 관리</p>
+                <div class="subtabs">
+                    <button class="subtab-btn active" data-subtab="db-robot" type="button">로봇로그</button>
+                    <button class="subtab-btn" data-subtab="db-stt" type="button">STT</button>
+                    <button class="subtab-btn" data-subtab="db-world" type="button">월드</button>
                 </div>
-                <div class="card">
-                    <table class="hmi-table">
-                        <thead><tr><th>ID</th><th>시각</th><th>물체</th><th>시도</th><th>그리퍼폭(mm)</th><th>결과</th></tr></thead>
-                        <tbody id="pick-log-body">
-                            <tr><td colspan="6" style="color: var(--muted);">불러오는 중…</td></tr>
-                        </tbody>
-                    </table>
+
+                <div class="subpanel show" id="db-robot">
+                    <div class="note ready">
+                        &#10003;&nbsp;<code>~/.ros/my_robot_pkg/pick_log.db</code>를 읽기 전용(WAL)으로 조회합니다 — 실제 데이터입니다.
+                    </div>
+                    <div class="card">
+                        <table class="hmi-table">
+                            <thead><tr><th>ID</th><th>시각</th><th>물체</th><th>시도</th><th>그리퍼폭(mm)</th><th>결과</th></tr></thead>
+                            <tbody id="pick-log-body">
+                                <tr><td colspan="6" style="color: var(--muted);">불러오는 중…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="subpanel" id="db-stt">
+                    <div class="note ready">
+                        &#10003;&nbsp;<code>~/.ros/voice_interface/voice_log.db</code>를 읽기 전용(WAL)으로 조회합니다 —
+                        웨이크워드 세션의 STT 인식/파싱/되묻기/STOP·RESUME·손감지무시/TTS 발화를 시간순으로 보여줍니다.
+                    </div>
+                    <div class="card">
+                        <table class="hmi-table">
+                            <thead><tr><th>ID</th><th>시각</th><th>종류</th><th>내용</th></tr></thead>
+                            <tbody id="voice-log-body">
+                                <tr><td colspan="4" style="color: var(--muted);">불러오는 중…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="subpanel" id="db-world">
+                    <div class="note ready">
+                        &#10003;&nbsp;DB가 아니라 <code>data/world_maps/</code> 디렉토리를 직접 읽어 나열합니다 —
+                        point cloud 파일은 SQL에 넣을 데이터가 아니라서 그대로 파일로 둡니다. 3D로 보려면
+                        hmi_bridge(월드맵 뷰어)를 따로 여세요.
+                    </div>
+                    <div class="card">
+                        <table class="hmi-table">
+                            <thead><tr><th>scan_id</th><th>시각</th><th>장애물 클러스터</th></tr></thead>
+                            <tbody id="worldmap-body">
+                                <tr><td colspan="3" style="color: var(--muted);">불러오는 중…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 
@@ -437,7 +487,7 @@ tick(); setInterval(tick, 1000);
 
 // 사이드바 탭 전환 - Bootstrap JS(CDN)에 의존하지 않는 순수 JS 구현.
 // 인터넷이 안 되는 환경(로봇 PC 등)에서 CDN 로드가 실패해도 탭 전환은 항상 되게 하려는 것.
-const panelListeners = { db: [loadPickAttempts], vision: [startVisionStream] };
+const panelListeners = { db: [loadPickAttempts, loadVoiceEvents, loadWorldmapScans], vision: [startVisionStream] };
 
 function showPanel(name) {
     document.querySelectorAll('.side-link').forEach(btn => {
@@ -571,6 +621,66 @@ async function loadPickAttempts() {
         tbody.innerHTML = '<tr><td colspan="6" style="color: var(--critical);">불러오기 실패: ' + e + '</td></tr>';
     }
 }
+
+async function loadVoiceEvents() {
+    const tbody = document.getElementById('voice-log-body');
+    try {
+        const res = await fetch('/api/db/voice_events?limit=50');
+        const data = await res.json();
+        const rows = data.rows || [];
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="color: var(--muted);">기록 없음 (get_keyword_node를 아직 안 띄웠거나 발화가 없음)</td></tr>';
+            return;
+        }
+        tbody.innerHTML = '';
+        rows.forEach(function (r) {
+            const tr = document.createElement('tr');
+            const ts = new Date(r.ts * 1000).toLocaleString('ko-KR');
+            [r.id, ts, r.kind, r.text].forEach(function (v) {
+                const td = document.createElement('td');
+                td.textContent = (v === null || v === undefined) ? '-' : v;
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color: var(--critical);">불러오기 실패: ' + e + '</td></tr>';
+    }
+}
+
+async function loadWorldmapScans() {
+    const tbody = document.getElementById('worldmap-body');
+    try {
+        const res = await fetch('/api/db/worldmap_scans?limit=30');
+        const data = await res.json();
+        const rows = data.rows || [];
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" style="color: var(--muted);">기록 없음 (아직 월드맵 스캔을 한 번도 안 함)</td></tr>';
+            return;
+        }
+        tbody.innerHTML = '';
+        rows.forEach(function (r) {
+            const tr = document.createElement('tr');
+            [r.scan_id, r.timestamp, r.cluster_count].forEach(function (v) {
+                const td = document.createElement('td');
+                td.textContent = (v === null || v === undefined) ? '-' : v;
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="3" style="color: var(--critical);">불러오기 실패: ' + e + '</td></tr>';
+    }
+}
+
+// DB 탭 안의 서브탭(로봇로그/STT/월드) 전환 - 메인 사이드바 탭과 같은 순수 JS 패턴
+// (Bootstrap 없이 직접 show/active 클래스만 토글).
+document.querySelectorAll('.subtab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.subtab-btn').forEach(b => b.classList.toggle('active', b === btn));
+        document.querySelectorAll('.subpanel').forEach(p => p.classList.toggle('show', p.id === btn.dataset.subtab));
+    });
+});
 
 loadDashboardSummary();
 loadPickAttempts();

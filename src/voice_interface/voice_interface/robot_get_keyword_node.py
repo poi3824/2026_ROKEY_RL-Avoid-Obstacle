@@ -21,6 +21,7 @@ from voice_interface.MicController import MicController, MicConfig
 from voice_interface.wakeup_word import WakeupWord
 from voice_interface.stt import STT
 from voice_interface.tts import TTS
+from voice_interface.voice_logger import VoiceLogger
 
 ############ Package Path & Environment Setting ############
 
@@ -365,6 +366,10 @@ RESUME / RESUME / RESUME / RESUME
         self._manual_stop = threading.Event()     # 세팅되면 진행 중인 녹음을 즉시 종료
         self.create_service(SetBool, VOICE_MANUAL_RECORD_SERVICE, self._on_manual_record)
 
+        # 2026-07-10: HMI DB 탭의 "STT" 서브탭용 이벤트 로거. pick_logger와 같은
+        # 패턴(SQLite, WAL) - hmi_interface가 읽기 전용으로 열어 조회한다.
+        self.voice_logger = VoiceLogger()
+
         # 2026-07-09: RESUME("다시 시작해")도 STOP처럼 brain_node를 거치지 않고
         # 여기서 바로 처리한다. ESTOP이 이제 액션을 중단시키지 않고 그 자리에서
         # 대기만 하는 구조라(motion_executor._handle_interrupts), brain_node의
@@ -487,6 +492,7 @@ RESUME / RESUME / RESUME / RESUME
                     )
                 self._flush_mic_stream()
                 self.get_logger().info(f"STT 인식 결과: '{output_message}'")
+                self.voice_logger.log_event("stt", output_message)
 
                 # Whisper는 무음/잡음 구간에서 빈 문자열이나 아주 짧은 환청을 자주
                 # 낸다. 이번 라운드만 건너뛰고(세션은 유지, 시간으로만 종료) LLM에
@@ -498,6 +504,7 @@ RESUME / RESUME / RESUME / RESUME
 
                 if any(word in output_message for word in STOP_KEYWORDS):
                     self.get_logger().warn(f"정지 키워드 감지(로컬): '{output_message}' -> 응급정지 호출")
+                    self.voice_logger.log_event("stop", output_message)
                     self._call_emergency_stop()
                     continue
 
@@ -514,6 +521,7 @@ RESUME / RESUME / RESUME / RESUME
                     self.get_logger().warn(
                         f"정지 키워드 감지(LLM): STT='{output_message}' -> 응급정지 호출"
                     )
+                    self.voice_logger.log_event("stop", output_message)
                     self._call_emergency_stop()
                     continue
 
@@ -521,6 +529,7 @@ RESUME / RESUME / RESUME / RESUME
                     # 2026-07-09: brain_node로 안 넘기고 여기서 바로 처리 —
                     # _call_safety_reset() 주석 참고(brain_node 메인 루프 블로킹 문제).
                     self.get_logger().warn(f"재개 명령 감지(LLM): STT='{output_message}'")
+                    self.voice_logger.log_event("resume", output_message)
                     self._call_safety_reset()
                     self._speak_locally("다시 시작합니다")
                     break
@@ -529,6 +538,7 @@ RESUME / RESUME / RESUME / RESUME
                     # 2026-07-09: hand 감지 오탐(YOLO) 임시 완화 — RESUME과 같은
                     # 이유로 brain_node를 거치지 않고 여기서 바로 처리한다.
                     self.get_logger().warn(f"손 감지 무시 명령(LLM): STT='{output_message}'")
+                    self.voice_logger.log_event("ignore_hand", output_message)
                     self._call_ignore_hand()
                     self._speak_locally("손 아닌 걸로 하겠습니다")
                     break
@@ -545,6 +555,7 @@ RESUME / RESUME / RESUME / RESUME
                 )
 
                 self.get_logger().warn(f"Detected tools: {keyword_str}")
+                self.voice_logger.log_event("command", keyword_str)
 
                 with self._lock:
                     self._latest_command = keyword_str
@@ -630,6 +641,7 @@ RESUME / RESUME / RESUME / RESUME
         text = text.strip()
         if not text:
             return
+        self.voice_logger.log_event("tts", text)
         self._speaking.set()
         self._publish_voice_state("speaking")
         try:
@@ -726,6 +738,10 @@ RESUME / RESUME / RESUME / RESUME
         response.success = True
         response.message = keyword_str
         return response
+
+    def destroy_node(self):
+        self.voice_logger.close()
+        super().destroy_node()
 
 
 def main():  # d2 메인문 일부 수정
