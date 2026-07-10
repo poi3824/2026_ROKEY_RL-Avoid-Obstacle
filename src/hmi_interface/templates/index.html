@@ -345,12 +345,16 @@
             </div>
 
             <div class="panel" id="vision">
-                <p class="lede">Vision 실시간 스트리밍</p>
-                <div class="note">
-                    &#9888;&nbsp;object_detection_node/RealSense 카메라 스트림을 아직 노출하지 않음.
-                    MJPEG 등으로 프레임을 웹에 흘려주는 엔드포인트가 object_detection 쪽에 추가돼야 함.
+                <p class="lede">Vision 실시간 스트리밍 — RealSense 컬러 카메라</p>
+                <div class="note" id="vision-note">
+                    &#9888;&nbsp;<span id="vision-status">hmi_vision_bridge 연결 대기 중…</span>
+                    (<code>ros2 run hmi_interface hmi_vision_bridge</code>가 떠 있어야 합니다 —
+                    <code>/camera/camera/color/image_raw</code> → 이 브릿지 → MJPEG → 브라우저)
                 </div>
-                <div class="placeholder-box">카메라 피드 영역 — 추후 연동</div>
+                <div class="card" style="padding:0; overflow:hidden;">
+                    <img id="vision-stream" alt="카메라 스트림" style="display:block; width:100%; max-height:520px; object-fit:contain; background:#10141b;">
+                    <div class="placeholder-box" id="vision-placeholder">카메라 피드 연결 안 됨</div>
+                </div>
             </div>
 
             <div class="panel" id="rl">
@@ -428,7 +432,7 @@ tick(); setInterval(tick, 1000);
 
 // 사이드바 탭 전환 - Bootstrap JS(CDN)에 의존하지 않는 순수 JS 구현.
 // 인터넷이 안 되는 환경(로봇 PC 등)에서 CDN 로드가 실패해도 탭 전환은 항상 되게 하려는 것.
-const panelListeners = { db: [loadPickAttempts] };
+const panelListeners = { db: [loadPickAttempts], vision: [startVisionStream] };
 
 function showPanel(name) {
     document.querySelectorAll('.side-link').forEach(btn => {
@@ -447,6 +451,45 @@ function showPanel(name) {
 document.querySelectorAll('.side-link[data-panel]').forEach(btn => {
     btn.addEventListener('click', () => showPanel(btn.dataset.panel));
 });
+
+// ---- Vision 탭: hmi_vision_bridge의 MJPEG 스트림 ----
+// websocket 없이 <img> 태그 하나로 multipart/x-mixed-replace 스트림을 그대로
+// 재생한다. Vision 탭을 처음 열 때만 연결을 시작한다(안 볼 땐 대역폭 안 씀).
+const VISION_PORT = 8766;
+let visionStarted = false;
+
+function startVisionStream() {
+    if (visionStarted) return;
+    visionStarted = true;
+
+    const img = document.getElementById('vision-stream');
+    const placeholder = document.getElementById('vision-placeholder');
+    const statusEl = document.getElementById('vision-status');
+    const noteEl = document.getElementById('vision-note');
+
+    function retry() {
+        setTimeout(() => {
+            img.src = `http://${location.hostname}:${VISION_PORT}/stream?_=${Date.now()}`;
+        }, 3000);
+    }
+
+    img.style.display = 'none';
+    img.onload = () => {
+        img.style.display = 'block';
+        placeholder.style.display = 'none';
+        statusEl.textContent = 'hmi_vision_bridge 연결됨 — 실시간 카메라 스트림 표시 중';
+        noteEl.classList.add('ready');
+    };
+    img.onerror = () => {
+        img.style.display = 'none';
+        placeholder.style.display = 'flex';
+        placeholder.textContent = '카메라 스트림 연결 실패 — hmi_vision_bridge가 떠 있는지 확인하세요 (3초 후 재시도)';
+        statusEl.textContent = 'hmi_vision_bridge 연결 안 됨';
+        noteEl.classList.remove('ready');
+        retry();
+    };
+    img.src = `http://${location.hostname}:${VISION_PORT}/stream`;
+}
 
 async function loadDashboardSummary() {
     try {
