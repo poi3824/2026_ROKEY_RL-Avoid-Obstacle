@@ -5,10 +5,10 @@ from openai import OpenAI
 
 
 class TTS:
-    def __init__(self, openai_api_key, voice="nova"):
+    def __init__(self, openai_api_key, voice="aria"):
         """
         voice 추천:
-        - nova: 밝고 자연스러운 여성 느낌
+        - aria: 밝고 자연스러운 여성 느낌
         - shimmer: 부드러운 여성 느낌
         - alloy: 중성 느낌
         """
