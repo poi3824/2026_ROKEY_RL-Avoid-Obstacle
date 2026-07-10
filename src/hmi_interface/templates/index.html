@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>통합 시스템 HMI</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- 2026-07-10: Bootstrap CDN 의존 제거 - 로봇 PC가 인터넷이 안 될 수 있어서
+         (실측: CDN 로드 실패 시 탭 전환 자체가 안 됨) 전부 순수 CSS/JS로 뺐다.
+         Google Fonts(Inter)는 실패해도 시스템 폰트로 자연스럽게 폴백되므로 남겨둔다. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
@@ -162,6 +164,45 @@
             padding: 10px 16px; font-weight: 700; font-size: 13px; background: var(--accent); color: #fff; cursor: pointer;
         }
         .btn-hmi:disabled { background: var(--line); color: var(--muted); cursor: not-allowed; }
+
+        /* voice orb (STT-TTS) */
+        .orb-card { display: flex; flex-direction: column; align-items: center; padding: 30px 20px 26px; }
+        .orb-wrap { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+        .orb-rings { position: relative; width: 168px; height: 168px; display: flex; align-items: center; justify-content: center; }
+        .orb-ring {
+            position: absolute; border-radius: 50%; background: var(--orb-color, var(--muted));
+            opacity: .16; transition: background-color .25s ease;
+            will-change: transform, opacity;
+        }
+        .orb-ring.r1 { width: 96px; height: 96px; }
+        .orb-ring.r2 { width: 128px; height: 128px; opacity: .10; }
+        .orb-ring.r3 { width: 160px; height: 160px; opacity: .06; }
+        .orb-core {
+            position: relative; width: 64px; height: 64px; border-radius: 50%;
+            background: var(--orb-color, var(--muted)); box-shadow: 0 0 0 6px rgba(255,255,255,.6);
+            transition: background-color .25s ease; z-index: 1;
+        }
+        .orb-state {
+            font-size: 13px; font-weight: 700; color: var(--ink-soft); letter-spacing: .02em;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .orb-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--orb-color, var(--muted)); }
+        .record-btn { margin-top: 4px; min-width: 150px; justify-content: center; }
+        .record-btn.is-recording { background: var(--critical); }
+
+        .log-box {
+            background: #10141b; border-radius: 10px; padding: 10px 14px; height: 260px;
+            overflow-y: auto; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px;
+            display: flex; flex-direction: column; gap: 3px;
+        }
+        .log-empty { color: #6b7686; font-family: inherit; }
+        .log-line { display: flex; gap: 8px; color: #d7dee6; line-height: 1.5; }
+        .log-line .log-time { color: #6b7686; flex: 0 0 auto; white-space: nowrap; }
+        .log-line .log-level { flex: 0 0 46px; font-weight: 700; }
+        .log-line.lvl-INFO .log-level { color: #5b9dd9; }
+        .log-line.lvl-WARN .log-level { color: var(--warn); }
+        .log-line.lvl-ERROR .log-level, .log-line.lvl-FATAL .log-level { color: var(--critical); }
+        .log-line .log-text { white-space: pre-wrap; word-break: break-word; }
     </style>
 </head>
 <body>
@@ -177,15 +218,15 @@
         </div>
 
         <div class="side-label">모니터링</div>
-        <button class="side-link active" id="dashboard-tab" data-bs-toggle="tab" data-bs-target="#dashboard" type="button" role="tab"><span class="ic">&#9635;</span>메인 대시보드</button>
-        <button class="side-link" id="stt-tts-tab" data-bs-toggle="tab" data-bs-target="#stt-tts" type="button" role="tab"><span class="ic">&#127908;</span>STT-TTS</button>
-        <button class="side-link" id="vision-tab" data-bs-toggle="tab" data-bs-target="#vision" type="button" role="tab"><span class="ic">&#128247;</span>Vision</button>
-        <button class="side-link" id="rl-tab" data-bs-toggle="tab" data-bs-target="#rl" type="button" role="tab"><span class="ic">&#8982;</span>RL / 장애물회피</button>
+        <button class="side-link active" id="dashboard-tab" data-panel="dashboard" type="button"><span class="ic">&#9635;</span>메인 대시보드</button>
+        <button class="side-link" id="stt-tts-tab" data-panel="stt-tts" type="button"><span class="ic">&#127908;</span>STT-TTS</button>
+        <button class="side-link" id="vision-tab" data-panel="vision" type="button"><span class="ic">&#128247;</span>Vision</button>
+        <button class="side-link" id="rl-tab" data-panel="rl" type="button"><span class="ic">&#8982;</span>RL / 장애물회피</button>
 
         <div class="side-label">설정</div>
-        <button class="side-link" id="param-tab" data-bs-toggle="tab" data-bs-target="#param" type="button" role="tab"><span class="ic">&#9881;</span>Parameter 설정</button>
-        <button class="side-link" id="db-tab" data-bs-toggle="tab" data-bs-target="#db" type="button" role="tab"><span class="ic">&#128451;</span>DB (SQLite)</button>
-        <button class="side-link" id="robot-tab" data-bs-toggle="tab" data-bs-target="#robot" type="button" role="tab"><span class="ic">&#129302;</span>로봇 제어 설정</button>
+        <button class="side-link" id="param-tab" data-panel="param" type="button"><span class="ic">&#9881;</span>Parameter 설정</button>
+        <button class="side-link" id="db-tab" data-panel="db" type="button"><span class="ic">&#128451;</span>DB (SQLite)</button>
+        <button class="side-link" id="robot-tab" data-panel="robot" type="button"><span class="ic">&#129302;</span>로봇 제어 설정</button>
     </aside>
 
     <main>
@@ -197,7 +238,7 @@
         <div class="tab-content" id="hmiTabsContent">
 
             <!-- 메인 대시보드: pick_logger 요약은 실데이터, 노드 상태는 아직 자리만 -->
-            <div class="tab-pane fade show active panel" id="dashboard" role="tabpanel">
+            <div class="panel show" id="dashboard">
                 <div class="card">
                     <h3>노드 상태</h3>
                     <div class="note">
@@ -271,20 +312,39 @@
                 </div>
             </div>
 
-            <div class="tab-pane fade panel" id="stt-tts" role="tabpanel">
+            <div class="panel" id="stt-tts">
                 <p class="lede">음성 인식(STT) 및 합성(TTS)</p>
-                <div class="note">
-                    &#9888;&nbsp;get_keyword_node/STT/TTS와 아직 연결 안 됨(오늘 할 일 목록의 STT-TTS DB 항목).
-                    지금은 UI 자리만 — 아래 입력은 아무 데도 전송되지 않습니다.
+                <div class="note" id="voice-ws-note">
+                    &#9888;&nbsp;<span id="voice-ws-status">hmi_voice_bridge 연결 대기 중…</span>
+                    (<code>ros2 run hmi_interface hmi_voice_bridge</code>가 떠 있어야 실제 로봇 마이크
+                    레벨/상태가 표시됩니다 — get_keyword_node → /voice/state, /voice/level → 이 브릿지 → 브라우저)
                 </div>
+                <div class="card orb-card">
+                    <h3>실시간 음성 상태</h3>
+                    <div class="orb-wrap">
+                        <div class="orb-rings">
+                            <div class="orb-ring r3"></div>
+                            <div class="orb-ring r2"></div>
+                            <div class="orb-ring r1"></div>
+                            <div class="orb-core" id="orb-core"></div>
+                        </div>
+                        <div class="orb-state" id="orb-state">대기 중</div>
+                        <button class="btn-hmi record-btn" id="record-btn" type="button">&#127908;&nbsp;녹음 시작</button>
+                    </div>
+                </div>
+
                 <div class="card">
-                    <h3>텍스트 입력/출력 테스트</h3>
-                    <textarea class="hmi-input" rows="3" placeholder="인식된 텍스트가 표시되거나, 합성할 텍스트를 입력하세요."></textarea>
-                    <button class="btn-hmi" disabled>음성 출력 (TTS) — 미구현</button>
+                    <h3>get_keyword_node 로그</h3>
+                    <div class="card-sub" style="font-size:11.5px; color:var(--muted); margin-bottom:10px;">
+                        get_keyword_node의 <code>/rosout</code> 로그를 그대로 보여줍니다 (웨이크워드 감지, STT 인식 결과, LLM 파싱 결과 등)
+                    </div>
+                    <div class="log-box" id="voice-log-box">
+                        <div class="log-empty" id="voice-log-empty">아직 로그 없음 — get_keyword_node에서 뭔가 로그를 찍으면 여기 나타납니다.</div>
+                    </div>
                 </div>
             </div>
 
-            <div class="tab-pane fade panel" id="vision" role="tabpanel">
+            <div class="panel" id="vision">
                 <p class="lede">Vision 실시간 스트리밍</p>
                 <div class="note">
                     &#9888;&nbsp;object_detection_node/RealSense 카메라 스트림을 아직 노출하지 않음.
@@ -293,7 +353,7 @@
                 <div class="placeholder-box">카메라 피드 영역 — 추후 연동</div>
             </div>
 
-            <div class="tab-pane fade panel" id="rl" role="tabpanel">
+            <div class="panel" id="rl">
                 <p class="lede">RL / 장애물회피 상태</p>
                 <div class="note">
                     &#9888;&nbsp;<code>rl_avoidance_node</code>는 아직 policy 로드/추론이 stub입니다(학습 loss/epoch
@@ -306,7 +366,7 @@
                 </div>
             </div>
 
-            <div class="tab-pane fade panel" id="param" role="tabpanel">
+            <div class="panel" id="param">
                 <p class="lede">시스템 환경 변수 설정</p>
                 <div class="note">
                     &#9888;&nbsp;지금은 <code>motion_node.py</code>에 하드코딩된 값을 읽기 전용으로만 보여줍니다.
@@ -322,7 +382,7 @@
                 </div>
             </div>
 
-            <div class="tab-pane fade panel" id="db" role="tabpanel">
+            <div class="panel" id="db">
                 <p class="lede">데이터베이스 관리 — pick_logger (SQLite)</p>
                 <div class="note ready">
                     &#10003;&nbsp;<code>~/.ros/my_robot_pkg/pick_log.db</code>를 읽기 전용(WAL)으로 조회합니다 — 실제 데이터입니다.
@@ -337,7 +397,7 @@
                 </div>
             </div>
 
-            <div class="tab-pane fade panel" id="robot" role="tabpanel">
+            <div class="panel" id="robot">
                 <p class="lede">로봇 제어 설정</p>
                 <div class="note">
                     &#9888;&nbsp;이 로봇(Doosan m0609)은 관절 PID가 아니라 DSR_ROBOT2 SDK의 movel/amovel(속도·가속도)
@@ -357,7 +417,6 @@
     </main>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 function tick() {
     const el = document.getElementById('clock');
@@ -367,11 +426,26 @@ function tick() {
 }
 tick(); setInterval(tick, 1000);
 
-// 사이드바 탭 전환 시 상단 타이틀 동기화 (버튼 텍스트에서 아이콘 span 뗀 나머지)
-document.querySelectorAll('.side-link').forEach(btn => {
-    btn.addEventListener('shown.bs.tab', () => {
-        document.getElementById('page-title').textContent = btn.textContent.trim();
+// 사이드바 탭 전환 - Bootstrap JS(CDN)에 의존하지 않는 순수 JS 구현.
+// 인터넷이 안 되는 환경(로봇 PC 등)에서 CDN 로드가 실패해도 탭 전환은 항상 되게 하려는 것.
+const panelListeners = { db: [loadPickAttempts] };
+
+function showPanel(name) {
+    document.querySelectorAll('.side-link').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.panel === name);
     });
+    document.querySelectorAll('.panel').forEach(panel => {
+        panel.classList.toggle('show', panel.id === name);
+    });
+    const activeBtn = document.querySelector(`.side-link[data-panel="${name}"]`);
+    if (activeBtn) {
+        document.getElementById('page-title').textContent = activeBtn.textContent.trim();
+    }
+    (panelListeners[name] || []).forEach(fn => fn());
+}
+
+document.querySelectorAll('.side-link[data-panel]').forEach(btn => {
+    btn.addEventListener('click', () => showPanel(btn.dataset.panel));
 });
 
 async function loadDashboardSummary() {
@@ -422,7 +496,126 @@ async function loadPickAttempts() {
 
 loadDashboardSummary();
 loadPickAttempts();
-document.getElementById('db-tab').addEventListener('shown.bs.tab', loadPickAttempts);
+
+// ---- voice orb (STT-TTS 탭): hmi_voice_bridge websocket 연결 ----
+(function () {
+    const STATE_META = {
+        idle:       { label: '대기 중 (웨이크워드 대기)', color: '#97a0b3' },
+        recording:  { label: '녹음 중', color: '#d1373f' },
+        processing: { label: '처리 중 (LLM 분석)', color: '#c07a10' },
+        speaking:   { label: '응답 중 (TTS)', color: '#12946b' },
+    };
+    const WS_PORT = 8765;
+
+    const core = document.getElementById('orb-core');
+    const rings = document.querySelectorAll('.orb-ring');
+    const stateEl = document.getElementById('orb-state');
+    const statusEl = document.getElementById('voice-ws-status');
+    const noteEl = document.getElementById('voice-ws-note');
+    const recordBtn = document.getElementById('record-btn');
+
+    let targetLevel = 0;
+    let shownLevel = 0;
+    let currentState = 'idle';
+    let ws = null;
+
+    const logBox = document.getElementById('voice-log-box');
+    const logEmpty = document.getElementById('voice-log-empty');
+    const MAX_LOG_LINES = 200;
+
+    function appendLog(entry) {
+        if (logEmpty && logEmpty.parentNode) logEmpty.remove();
+
+        const line = document.createElement('div');
+        const level = (entry.level || 'INFO').toUpperCase();
+        line.className = 'log-line lvl-' + level;
+
+        const timeEl = document.createElement('span');
+        timeEl.className = 'log-time';
+        const d = new Date((entry.stamp || Date.now() / 1000) * 1000);
+        const pad = n => String(n).padStart(2, '0');
+        timeEl.textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+
+        const levelEl = document.createElement('span');
+        levelEl.className = 'log-level';
+        levelEl.textContent = level;
+
+        // 로그 텍스트는 ROS 노드가 보낸 임의 문자열이라 textContent로만 넣는다
+        // (innerHTML 문자열 조립 금지 - XSS 방지).
+        const textEl = document.createElement('span');
+        textEl.className = 'log-text';
+        textEl.textContent = entry.text || '';
+
+        line.appendChild(timeEl);
+        line.appendChild(levelEl);
+        line.appendChild(textEl);
+        logBox.appendChild(line);
+
+        while (logBox.children.length > MAX_LOG_LINES) {
+            logBox.removeChild(logBox.firstChild);
+        }
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function setState(state) {
+        currentState = state;
+        const meta = STATE_META[state] || STATE_META.idle;
+        document.documentElement.style.setProperty('--orb-color', meta.color);
+        stateEl.innerHTML = '<span class="dot"></span>' + meta.label;
+
+        // 2026-07-10: 버튼 표시는 이 서버 state를 그대로 따른다(따로 상태를 안 들고
+        // 있음) - 웨이크워드("헬로우 로키")로 세션이 시작돼도 버튼이 항상 실제
+        // 상태와 일치하게 "녹음 중지"로 바뀐다.
+        recordBtn.classList.toggle('is-recording', state === 'recording');
+        recordBtn.textContent = state === 'recording' ? '⏹️ 녹음 중지' : '🎤 녹음 시작';
+    }
+    setState('idle');
+
+    recordBtn.addEventListener('click', () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ cmd: currentState === 'recording' ? 'stop_record' : 'start_record' }));
+    });
+
+    // 60fps로 부드럽게 스케일 갱신 (websocket 메시지가 뚝뚝 끊겨 와도 안 튀도록 보간)
+    function animate() {
+        shownLevel += (targetLevel - shownLevel) * 0.25;
+        const scale = 1 + shownLevel * 0.9;
+        core.style.transform = `scale(${scale})`;
+        rings.forEach((el, i) => {
+            const ringScale = 1 + shownLevel * (0.9 + i * 0.5);
+            el.style.transform = `scale(${ringScale})`;
+        });
+        requestAnimationFrame(animate);
+    }
+    animate();
+
+    function connect() {
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        ws = new WebSocket(`${proto}://${location.hostname}:${WS_PORT}`);
+
+        ws.onopen = () => {
+            statusEl.textContent = 'hmi_voice_bridge 연결됨 — 실제 로봇 마이크 상태 표시 중';
+            noteEl.classList.add('ready');
+        };
+        ws.onmessage = (ev) => {
+            try {
+                const msg = JSON.parse(ev.data);
+                if (msg.state) setState(msg.state);
+                if (typeof msg.level === 'number') targetLevel = Math.max(0, Math.min(1, msg.level));
+                if (msg.log) appendLog(msg.log);
+            } catch (e) { /* 무시 */ }
+        };
+        ws.onclose = () => {
+            statusEl.textContent = 'hmi_voice_bridge 연결 끊김 — 3초 후 재시도';
+            noteEl.classList.remove('ready');
+            targetLevel = 0;
+            setState('idle');
+            setTimeout(connect, 3000);
+        };
+        ws.onerror = () => ws.close();
+    }
+    connect();
+})();
 </script>
 </body>
 </html>

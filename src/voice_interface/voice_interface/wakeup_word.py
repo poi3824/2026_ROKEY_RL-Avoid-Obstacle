@@ -4,6 +4,8 @@ from openwakeword.model import Model
 from scipy.signal import resample
 from ament_index_python.packages import get_package_share_directory
 
+from voice_interface.audio_level import normalized_rms
+
 # 2026-07: cobot_ws/pick_and_place_voice에서 robot_ws/voice_interface로 이전.
 # 원래 코드는 여기 PACKAGE_NAME이 "pick_and_place_voice"였는데, 그 옆의
 # get_keyword_node.py는 .env를 "voice_processing"이라는 또 다른 패키지에서
@@ -21,12 +23,15 @@ class WakeupWord:
         self.model_name = MODEL_NAME.split(".", maxsplit=1)[0]
         self.stream = None
         self.buffer_size = buffer_size
+        # 2026-07-10: HMI(STT-TTS 탭)의 오디오 레벨 오브가 웨이크워드 대기 중에도
+        # 반응하도록, 매 청크 읽을 때마다 정규화된 RMS를 여기 저장해둔다 —
+        # robot_get_keyword_node가 이 값을 읽어 /voice/level로 발행한다.
+        self.last_level = 0.0
 
     def is_wakeup(self):
-        audio_chunk = np.frombuffer(
-            self.stream.read(self.buffer_size, exception_on_overflow=False),
-            dtype=np.int16,
-        )
+        raw = self.stream.read(self.buffer_size, exception_on_overflow=False)
+        audio_chunk = np.frombuffer(raw, dtype=np.int16)
+        self.last_level = normalized_rms(audio_chunk)
         audio_chunk = resample(audio_chunk, int(len(audio_chunk) * 16000 / 48000))
         outputs = self.model.predict(audio_chunk, threshold=0.1)
         confidence = outputs[self.model_name]
