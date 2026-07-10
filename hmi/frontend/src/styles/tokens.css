@@ -1,0 +1,83 @@
+/* 기존 hmi_interface/templates/index.html의 :root 디자인 토큰을 그대로 이식.
+   교체 대상 화면이지만 이미 검증된 색상 팔레트라 재사용한다. */
+:root {
+  --ink: #10151f;
+  --ink-soft: #5a6478;
+  --muted: #97a0b3;
+  --line: #e6e9f0;
+  --surface: #ffffff;
+  --page: #f3f5f9;
+  --accent: #2f5fe0;
+  --accent-soft: #eaf0ff;
+  --good: #12946b;
+  --good-bg: #e3f6ee;
+  --warn: #c07a10;
+  --warn-bg: #fdf1dc;
+  --critical: #d1373f;
+  --critical-bg: #fbe4e5;
+  --radius: 14px;
+  --shadow: 0 1px 2px rgba(16,21,31,.04), 0 10px 24px -14px rgba(16,21,31,.16);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: "Inter", -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  font-size: 14px;
+}
+
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 18px 20px; margin-bottom: 18px;
+}
+.card h3 {
+  font-size: 12.5px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase;
+  letter-spacing: .04em; margin: 0 0 14px;
+}
+
+.kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; }
+.kpi .label { font-size: 12px; color: var(--ink-soft); font-weight: 600; margin-bottom: 10px; }
+.kpi .value { font-size: 26px; font-weight: 800; letter-spacing: -.01em; }
+
+.badge { font-weight: 700; font-size: 11px; padding: 3px 10px; border-radius: 20px; display: inline-block; }
+.badge.good { background: var(--good-bg); color: var(--good); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.critical { background: var(--critical-bg); color: var(--critical); }
+.badge.muted { background: var(--page); color: var(--muted); }
+
+table.hmi-table { width: 100%; border-collapse: collapse; font-size: 12.8px; }
+table.hmi-table th {
+  text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted); padding: 0 10px 10px; font-weight: 700;
+}
+table.hmi-table td { padding: 9px 10px; border-top: 1px solid var(--line); }
+
+.note {
+  display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; color: var(--warn);
+  background: var(--warn-bg); border-radius: 10px; padding: 10px 14px; margin-bottom: 18px;
+}
+.note.ready { color: var(--good); background: var(--good-bg); }
+
+.placeholder-box {
+  background: #171c26; color: #cfd6e6; border-radius: var(--radius); min-height: 220px;
+  display: flex; align-items: center; justify-content: center; font-size: 13px; text-align: center; padding: 20px;
+}
+
+.lede { font-size: 13px; color: var(--ink-soft); margin-bottom: 18px; max-width: 720px; }
+
+.subtabs { display: flex; gap: 6px; margin-bottom: 16px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.subtab-btn {
+  border: none; background: var(--page); color: var(--ink-soft);
+  font-size: 12.5px; font-weight: 700; padding: 7px 14px; border-radius: 20px; cursor: pointer;
+}
+.subtab-btn:hover:not(.active) { background: var(--line); }
+.subtab-btn.active { background: var(--accent); color: #fff; }
+
+.split-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .split-row { grid-template-columns: 1fr; } }
+
+.hmi-table a { color: var(--accent); font-weight: 600; text-decoration: none; }
+.hmi-table a:hover { text-decoration: underline; }

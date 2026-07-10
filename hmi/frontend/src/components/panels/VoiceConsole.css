@@ -1,0 +1,19 @@
+.orb-card { display: flex; flex-direction: column; align-items: center; padding: 30px 20px 26px; }
+.orb-wrap { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+.orb-rings { position: relative; width: 168px; height: 168px; display: flex; align-items: center; justify-content: center; }
+.orb-ring { position: absolute; border-radius: 50%; opacity: .12; transition: background-color .25s ease; }
+.orb-ring.r1 { width: 96px; height: 96px; }
+.orb-ring.r2 { width: 128px; height: 128px; opacity: .08; }
+.orb-ring.r3 { width: 160px; height: 160px; opacity: .05; }
+.orb-core {
+  position: relative; width: 64px; height: 64px; border-radius: 50%;
+  box-shadow: 0 0 0 6px rgba(255,255,255,.6); transition: background-color .25s ease, transform .1s ease; z-index: 1;
+}
+.orb-state { font-size: 13px; font-weight: 700; color: var(--ink-soft); display: flex; align-items: center; gap: 8px; }
+.orb-state .dot { width: 7px; height: 7px; border-radius: 50%; }
+.btn-hmi {
+  display: inline-flex; align-items: center; gap: 8px; border: none; border-radius: 10px;
+  padding: 10px 16px; font-weight: 700; font-size: 13px; background: var(--accent); color: #fff; cursor: pointer;
+}
+.record-btn { min-width: 150px; justify-content: center; }
+.record-btn.is-recording { background: var(--critical); }

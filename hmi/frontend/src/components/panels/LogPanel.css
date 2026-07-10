@@ -1,0 +1,10 @@
+.log-box {
+  background: #10141b; border-radius: 10px; padding: 10px 14px; height: 260px;
+  overflow-y: auto; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.log-empty { color: #6b7686; }
+.log-line { display: flex; gap: 8px; color: #d7dee6; line-height: 1.5; }
+.log-line .log-time { color: #6b7686; flex: 0 0 auto; white-space: nowrap; }
+.log-line .log-level { flex: 0 0 46px; font-weight: 700; }
+.log-line .log-text { white-space: pre-wrap; word-break: break-word; }
