@@ -1,0 +1,118 @@
+<mxfile host="app.diagrams.net" modified="2026-07-09T00:00:00.000Z" agent="claude" version="24.0.0">
+  <diagram name="노드 구조" id="node-architecture-page">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2700" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="robot_ws 노드 구조 (2026-07-09 기준)" style="text;html=1;fontSize=40;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="700" y="10" width="1300" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="&lt;b&gt;범례&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;color:#000000&quot;&gt;――――&lt;/span&gt; topic&lt;br&gt;&lt;span style=&quot;color:#0000CC&quot;&gt;- - - -&lt;/span&gt; service&lt;br&gt;&lt;span style=&quot;color:#009900&quot;&gt;━━━━&lt;/span&gt; action&lt;br&gt;&lt;span style=&quot;color:#FF0000&quot;&gt;━━━━&lt;/span&gt; 하드정지(직접)&lt;br&gt;&lt;span style=&quot;color:#CC6600&quot;&gt;- - - -&lt;/span&gt; 2026-07-09 신규(brain 우회)" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fontSize=15;fillColor=#f5f5f5;strokeColor=#666666;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="2320" y="10" width="360" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 외부 하드웨어/드라이버 (이 워크스페이스 밖) ===== -->
+        <mxCell id="cam" value="&lt;b&gt;RealSense Camera Node&lt;/b&gt;&lt;br&gt;(외부 실행: realsense2_camera)&lt;br&gt;&lt;br&gt;발행 토픽:&lt;br&gt;/camera/camera/color/image_raw&lt;br&gt;/camera/camera/aligned_depth_to_color/image_raw&lt;br&gt;/camera/camera/color/camera_info" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="60" y="120" width="480" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="doosan" value="&lt;b&gt;Doosan 로봇 드라이버&lt;/b&gt;&lt;br&gt;(외부 실행: dsr_bringup2)&lt;br&gt;&lt;br&gt;제공 서비스:&lt;br&gt;DSR_ROBOT2 (movel/amovel/movej/&lt;br&gt;check_motion/get_current_posx 등)&lt;br&gt;/dsr01/motion/move_stop" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="120" width="480" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gripper" value="&lt;b&gt;OnRobot RG2 그리퍼&lt;/b&gt;&lt;br&gt;192.168.1.1:502 (Modbus TCP, ROS 아님)&lt;br&gt;&lt;br&gt;레지스터 0: 힘/폭 명령(grip/stop)&lt;br&gt;레지스터 267: 실제 너비(1/10mm)&lt;br&gt;레지스터 268: busy / grip_detected&lt;br&gt;(2026-07-09: 소켓 접근에 락 추가)" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="2140" y="420" width="480" height="220" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 이 워크스페이스 노드들 ===== -->
+        <mxCell id="objdet" value="&lt;b&gt;object_detection_node&lt;/b&gt;&lt;br&gt;(object_detection 패키지)&lt;br&gt;&lt;br&gt;Executor: MultiThreadedExecutor(3)&lt;br&gt;콜백그룹: hand_cbg / depth_cbg / visibility_cbg&lt;br&gt;(2026-07-09 — 스캔 스윕용 가벼운 가시성&lt;br&gt;체크 추가로 3번째 콜백그룹 분리)&lt;br&gt;&lt;br&gt;제공 서비스:&lt;br&gt;/get_3d_position (SrvDepthPosition,&lt;br&gt;8프레임 융합 정밀 탐지 + grasp 각도)&lt;br&gt;/check_visibility (SrvVisibilityCheck, 신규 —&lt;br&gt;단일 프레임 가벼운 가시성 체크)&lt;br&gt;발행 토픽: /hand_detected&lt;br&gt;(0.3초 주기, 최근 5회 판정 다수결)&lt;br&gt;&lt;br&gt;내부: ImgNode(RealSense 구독),&lt;br&gt;YoloModel(finetune_260709-yolov8s.pt)&lt;br&gt;grasp 각도: 최빈 구간 기반 순환평균(2026-07-09)&lt;br&gt;파일: detection.py / yolo.py / realsense.py" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="60" y="460" width="580" height="560" as="geometry" />
+        </mxCell>
+
+        <mxCell id="safety" value="&lt;b&gt;safety_monitor_node&lt;/b&gt;&lt;br&gt;(safety_monitor 패키지)&lt;br&gt;&lt;br&gt;구독: /hand_detected, /voice/estop&lt;br&gt;제공 서비스: /safety/estop, /safety/reset,&lt;br&gt;/safety/ignore_hand (신규 2026-07-09)&lt;br&gt;호출 서비스: /dsr01/motion/move_stop&lt;br&gt;(브레인 상태와 무관하게 즉시 하드정지)&lt;br&gt;&lt;br&gt;2026-07-09: ESTOP_STOP_MODE = HOLD(3)로 변경&lt;br&gt;(서보 토크 유지 — RESUME 시 하던 동작 이어감,&lt;br&gt;이전엔 QSTOP_STO라 재개 시 홈으로 가는 부작용)&lt;br&gt;IGNORE_HAND: &quot;손 아니야&quot; 시 hand 감지 무시&lt;br&gt;(래치 아니라 실시간값이라 시간 기반 억제)&lt;br&gt;&lt;br&gt;발행 토픽: /safety/state&lt;br&gt;(RUN / PAUSE / ESTOP, 0.5초 하트비트)&lt;br&gt;&lt;br&gt;파일: safety_monitor_node.py" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="780" y="460" width="560" height="560" as="geometry" />
+        </mxCell>
+
+        <mxCell id="motion" value="&lt;b&gt;motion_node&lt;/b&gt;&lt;br&gt;(my_robot_pkg 패키지)&lt;br&gt;&lt;br&gt;Executor: MultiThreadedExecutor(4)&lt;br&gt;ReentrantCallbackGroup + goal_callback&lt;br&gt;&lt;br&gt;제공 액션: motion/move_to, /pick, /place&lt;br&gt;(Pick.scan_pose_b 필드 추가, 2026-07-09 —&lt;br&gt;비어있으면 기존처럼 단일 스캔 지점만 봄)&lt;br&gt;호출 서비스: /get_3d_position, /check_visibility(신규)&lt;br&gt;구독: /safety/state&lt;br&gt;&lt;br&gt;내부: dsr_node(DR_init 연동),&lt;br&gt;MotionExecutor(move_linear/pick/place/&lt;br&gt;sweep_to_detect 신규),&lt;br&gt;RG2Gripper(Modbus 직접 소켓)&lt;br&gt;&lt;br&gt;2026-07-09: _handle_interrupts 통합 —&lt;br&gt;ESTOP/손감지 둘 다 &quot;그 자리 홀드 후 같은&lt;br&gt;목적지로 재개&quot; 방식으로 일원화(액션 abort 안 함)&lt;br&gt;파일: motion_node.py / motion_executor.py / gripper.py" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="460" width="580" height="560" as="geometry" />
+        </mxCell>
+
+        <mxCell id="keyword" value="&lt;b&gt;get_keyword_node&lt;/b&gt;&lt;br&gt;(voice_interface 패키지)&lt;br&gt;&lt;br&gt;백그라운드 스레드 상시 실행:&lt;br&gt;웨이크워드(&quot;헬로우 로키&quot;) 대기 → STT(Whisper)&lt;br&gt;→ LLM(GPT-4o) 명령 파싱&lt;br&gt;&lt;br&gt;제공 서비스: /get_keyword (Trigger)&lt;br&gt;발행 토픽: /voice/estop&lt;br&gt;(STOP 키워드 감지 시 LLM 안 거치고 즉시)&lt;br&gt;&lt;br&gt;2026-07-09: RESUME/IGNORE_HAND도 brain_node&lt;br&gt;안 거치고 여기서 /safety/reset,&lt;br&gt;/safety/ignore_hand 직접 호출 — brain_node&lt;br&gt;메인 루프가 진행 중 액션 결과 대기로&lt;br&gt;블로킹돼 있어도(HOLD 방식이라 항상 그럼)&lt;br&gt;즉시 처리 가능(이전엔 데드락으로 전달 안 됨)&lt;br&gt;&lt;br&gt;세션: 유효 명령 하나 처리하면 즉시 종료&lt;br&gt;(이전 명령 덮어쓰기 버그 수정)&lt;br&gt;웨이크워드: 세션 종료 시 모델 reset()으로&lt;br&gt;내부 버퍼 초기화(재감지 오탐 수정)&lt;br&gt;&lt;br&gt;파일: robot_get_keyword_node.py / stt.py /&lt;br&gt;wakeup_word.py / MicController.py" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1100" width="580" height="500" as="geometry" />
+        </mxCell>
+
+        <mxCell id="brain" value="&lt;b&gt;brain_node&lt;/b&gt;&lt;br&gt;(my_robot_pkg 패키지, 오케스트레이터)&lt;br&gt;&lt;br&gt;Executor: SingleThreadedExecutor&lt;br&gt;(백그라운드 스레드) + 메인 루프(run_once)&lt;br&gt;&lt;br&gt;호출 서비스: /get_keyword, /safety/reset&lt;br&gt;액션 클라이언트: motion/move_to, /pick, /place&lt;br&gt;(ACTION_RESULT_TIMEOUT_SEC 130s→360s,&lt;br&gt;2026-07-09 — 정지 유지 시간도 포함되므로 증가)&lt;br&gt;구독: /safety/state&lt;br&gt;&lt;br&gt;2026-07-09: STOP/RESUME 분기는 이제 방어적&lt;br&gt;무시만 함(get_keyword_node가 직접 처리해서&lt;br&gt;실제로 여기 도달할 일 없음)&lt;br&gt;&lt;br&gt;POSITION_COORDS 관리(home/scan/scan_b/&lt;br&gt;target1~3) — scan_b: 스캔 스윕 2번째 지점(신규)&lt;br&gt;&lt;br&gt;파일: brain_node.py" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacing=10;fontSize=16;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="780" y="1100" width="560" height="500" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 연결선 ===== -->
+        <mxCell id="e1" value="color/depth/camera_info (topic)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeWidth=2;" edge="1" parent="1" source="cam" target="objdet">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" value="/get_3d_position (service)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;dashed=1;strokeColor=#0000CC;strokeWidth=2;" edge="1" parent="1" source="objdet" target="motion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e14" value="/check_visibility (service, 신규)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;dashed=1;strokeColor=#0000CC;strokeWidth=2;" edge="1" parent="1" source="motion" target="objdet">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1300" y="700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e3" value="/hand_detected (topic)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeWidth=2;" edge="1" parent="1" source="objdet" target="safety">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="/voice/estop (topic)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeWidth=2;" edge="1" parent="1" source="keyword" target="safety">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e13" value="/safety/reset, /safety/ignore_hand&#10;(service, 직접 호출 — brain 우회, 신규 2026-07-09)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;dashed=1;strokeColor=#CC6600;strokeWidth=3;" edge="1" parent="1" source="keyword" target="safety">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="1000" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e5" value="/get_keyword (service)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;dashed=1;strokeColor=#0000CC;strokeWidth=2;" edge="1" parent="1" source="keyword" target="brain">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" value="/safety/state (topic)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeWidth=2;" edge="1" parent="1" source="safety" target="brain">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" value="/safety/state (topic)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeWidth=2;" edge="1" parent="1" source="safety" target="motion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" value="/safety/reset (service, 방어적 — 실제로 거의 안 옴)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;dashed=1;strokeColor=#0000CC;strokeWidth=2;" edge="1" parent="1" source="brain" target="safety">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" value="/dsr01/motion/move_stop&#10;(직접 하드정지, HOLD 모드)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeColor=#FF0000;strokeWidth=3;" edge="1" parent="1" source="safety" target="doosan">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10" value="motion/move_to, /pick(+scan_pose_b), /place (action)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeColor=#009900;strokeWidth=3;" edge="1" parent="1" source="brain" target="motion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" value="DSR_ROBOT2 (amovel/movej/&#10;check_motion/get_current_posx)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;dashed=1;strokeColor=#0000CC;strokeWidth=2;" edge="1" parent="1" source="motion" target="doosan">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e12" value="Modbus TCP (직접 소켓)" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=15;strokeWidth=2;" edge="1" parent="1" source="motion" target="gripper">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
