@@ -71,7 +71,7 @@ export default function App() {
         </div>
       )}
 
-      {activeId === "performance" && <PerformancePage summary={db.summary} />}
+      {activeId === "performance" && <PerformancePage summary={db.summary} pickAttempts={db.pickAttempts} />}
 
       {activeId === "settings" && <SettingsPage />}
     </AppShell>

@@ -87,7 +87,7 @@ class MotionExecutor:
         get_surface_z=None, redetect=None, grip_min_width=None, logger=None,
         check_motion=None, estop_event=None, hand_pause_event=None,
         dsr_lock=None, amovej=None, get_current_posj=None, get_current_posx=None,
-        cancel_event=None,
+        cancel_event=None, get_grasp_delta=None,
     ):
         self._movel = movel  # amovel을 주입받는다 (위 모듈 주석 참고)
         self._movej = movej
@@ -111,6 +111,7 @@ class MotionExecutor:
         # 통 크기가 바뀌면 코드를 고치지 않고 ROS 파라미터로 조정할 수 있도록 주입받는다.
         self.grip_min_width = grip_min_width if grip_min_width is not None else DEFAULT_GRIP_MIN_WIDTH
         self.logger = logger  # pick_logger.PickLogger를 주입받음 (없으면 기록 생략)
+        self.get_grasp_delta = get_grasp_delta  # motion_node.get_last_grasp_delta를 주입받음 (없으면 None 기록)
         self._check_motion = check_motion  # DSR_ROBOT2.check_motion을 주입받음
         self._estop_event = estop_event  # robot_action_node의 threading.Event를 주입받음
         # 2026-07-07: object_detection_node가 /hand_detected 토픽으로 발행하는 걸
@@ -404,8 +405,10 @@ class MotionExecutor:
             print(f"motion_done:{motion_done}, grip_detected: {grip_detected}, width_ok: {width_ok}, success: {success}")
 
             if self.logger:
+                grasp_delta_deg = self.get_grasp_delta() if self.get_grasp_delta else None
                 self.logger.log_attempt(
                     obj_label, attempt + 1, surface_z, width, grip_detected, motion_done, success,
+                    grasp_delta_deg,
                 )
 
             if success:

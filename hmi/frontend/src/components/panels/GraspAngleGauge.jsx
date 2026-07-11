@@ -33,6 +33,7 @@ function statusFor(delta) {
 export default function GraspAngleGauge({ deltaDeg = MOCK_DELTA_DEG, isMock = true }) {
   const status = statusFor(deltaDeg);
   const needleTip = polar(deltaDeg, NEEDLE_R);
+  const deltaLabel = Math.round(deltaDeg * 10) / 10;
 
   return (
     <div className="card">
@@ -63,7 +64,7 @@ export default function GraspAngleGauge({ deltaDeg = MOCK_DELTA_DEG, isMock = tr
         <line x1={CX} y1={CY} x2={needleTip.x} y2={needleTip.y} stroke="var(--ink)" strokeWidth="3" strokeLinecap="round" />
         <circle cx={CX} cy={CY} r="6" fill="var(--ink)" />
         <text x={CX} y={CY + 34} fill="var(--ink)" fontSize="22" fontWeight="800" textAnchor="middle">
-          {deltaDeg > 0 ? "+" : ""}{deltaDeg}°
+          {deltaLabel > 0 ? "+" : ""}{deltaLabel}°
         </text>
       </svg>
       <div style={{ textAlign: "center", marginTop: -6 }}>

@@ -32,22 +32,39 @@ class PickLogger:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_SCHEMA)
+        self._migrate_add_angle_delta_column()
         self._conn.commit()
+
+    def _migrate_add_angle_delta_column(self):
+        # 2026-07-11: HMI Performance 탭의 그립 각도 정렬 게이지용으로 추가.
+        # CREATE TABLE IF NOT EXISTS는 이미 존재하는(옛 스키마) 테이블엔 컬럼을
+        # 안 얹어주므로, 기존에 pick_log.db를 갖고 있던 배포에서도 깨지지 않게
+        # 컬럼 존재 여부를 직접 확인하고 없으면 ALTER TABLE로 추가한다.
+        cols = [row[1] for row in self._conn.execute("PRAGMA table_info(pick_attempts)")]
+        if "angle_delta_deg" not in cols:
+            self._conn.execute("ALTER TABLE pick_attempts ADD COLUMN angle_delta_deg REAL")
 
     def log_attempt(
         self, obj_label, attempt_no, surface_z, gripper_width, grip_detected, motion_done, success,
+        angle_delta_deg=None,
     ):
-        """pick() 한 번의 시도(attempt) 결과를 한 행으로 남긴다. 실패해도 예외를 올리지 않는다."""
+        """pick() 한 번의 시도(attempt) 결과를 한 행으로 남긴다. 실패해도 예외를 올리지 않는다.
+
+        angle_delta_deg: motion_node.compute_grasp_c()가 계산한 grasp 정렬 오차(deg,
+        [-90,90)) - 0에 가까울수록 그리퍼 축이 물체의 짧은 변에 정렬됨. get_grasp_delta
+        콜백이 없거나(구형 호출부) 아직 탐지가 없었으면 None.
+        """
         try:
             self._conn.execute(
                 "INSERT INTO pick_attempts "
                 "(ts, obj_label, attempt_no, surface_z_mm, gripper_width_mm, "
-                " grip_detected, motion_done, success) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " grip_detected, motion_done, success, angle_delta_deg) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(), obj_label, attempt_no, surface_z, gripper_width,
                     None if grip_detected is None else int(grip_detected),
                     None if motion_done is None else int(motion_done),
-                    int(success),
+                    int(success), angle_delta_deg,
                 ),
             )
             self._conn.commit()
