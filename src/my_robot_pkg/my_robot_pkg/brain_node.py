@@ -344,10 +344,17 @@ class BrainNode(Node):
         self._call_service(self.safety_reset_client, Trigger.Request(), timeout_sec=2.0)
 
     def _update_world_map(self):
+        # 2026-07-11: 실패 경로 3곳 전부 home 복귀 추가 - 원래는 성공했을 때만
+        # 복귀시켰는데(스캔 그리드 마지막 pose에서 그냥 끝나는 문제 때문에 추가된
+        # 로직), 타임아웃/스캔 실패로 끝나도 로봇이 스캔 중이던 임의의 포즈에
+        # 그대로 남아있어 다음 명령이나 사람 접근 시 위험할 수 있었다. 서비스가
+        # 아예 준비 안 된 경우(스캔을 시작도 안 함)까지 포함해 세 분기 모두
+        # 일관되게 home으로 보낸다(성공 분기와 동일하게 결과 확인 없이 fire-and-forget).
         if not self.world_map_client.service_is_ready():
             if not self.world_map_client.wait_for_service(timeout_sec=1.0):
                 self.get_logger().warn("update_world_map 서비스 없음 — 생략")
                 self._say("월드맵 서비스에 연결할 수 없습니다")
+                self._send_move_to(POSITION_COORDS["home"], "home")
                 return
 
         self._say("월드맵 스캔을 시작합니다")
@@ -358,11 +365,13 @@ class BrainNode(Node):
         if result is None:
             self.get_logger().error(f"world map 스캔 타임아웃({WORLD_MAP_SCAN_TIMEOUT_SEC}s)")
             self._say("월드맵 스캔이 시간 초과되었습니다")
+            self._send_move_to(POSITION_COORDS["home"], "home")
             return
 
         if not result.success:
             self.get_logger().warn(f"world map 스캔 실패: {result.message}")
             self._say("월드맵 스캔에 실패했습니다")
+            self._send_move_to(POSITION_COORDS["home"], "home")
             return
 
         self.get_logger().info(f"world map 스캔 완료: {result.message}")
