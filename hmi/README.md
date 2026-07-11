@@ -59,16 +59,27 @@ npm run dev                     # http://localhost:5173, Vite dev server
 source /opt/ros/humble/setup.bash
 colcon build --packages-select hmi_ros_bridge   # 저장소 루트에서
 source install/setup.bash
-ros2 run hmi_ros_bridge hmi_ros_bridge_server
+ros2 launch hmi_ros_bridge hmi_bringup.launch.py   # hmi_ros_bridge_server + hmi_vision_stream 한 번에
 ```
+개별로 띄우려면 `ros2 run hmi_ros_bridge hmi_ros_bridge_server` / `ros2 run hmi_ros_bridge
+hmi_vision_stream`(디버깅 중 로그를 노드별로 분리해서 보고 싶을 때 편함).
+
 `hmi/backend/.env`를 자동으로 읽어 `HMI_BRIDGE_TOKEN`/`HMI_BACKEND_*`를 공유한다
 (다른 위치를 쓰려면 `HMI_ROS_BRIDGE_ENV_FILE` 환경변수로 지정). `python-socketio[client]`,
 `python-dotenv`는 시스템/사용자 Python에 `pip install --user`로 설치되어 있어야 한다
 (이 워크스페이스가 이미 `websockets`를 그렇게 설치해 쓰는 것과 동일한 관행).
 
+**Ctrl+C가 안 먹는 것처럼 보이면**: `python-socketio`의 `socketio.Client(handle_sigint=True,
+기본값)`가 프로세스의 SIGINT 핸들러를 가로채서 `rclpy.init()`의 SIGINT 처리와 충돌하는
+실기 버그가 있었다(`socketio_worker.py`에서 `handle_sigint=False`로 수정됨,
+`test_sigint_shutdown.py`가 회귀 테스트) - 최신 빌드인지(`colcon build`) 확인할 것.
+
 테스트: `python3 -m pytest src/hmi_ros_bridge/test/test_emit_channel.py -p no:anyio`
 (순수 로직, ROS 불필요), `source /opt/ros/humble/setup.bash && python3 -m pytest
-src/hmi_ros_bridge/test/test_bridge_node.py -p no:anyio` (실제 rclpy 그래프로 검증).
+src/hmi_ros_bridge/test/test_bridge_node.py -p no:anyio` (실제 rclpy 그래프로 검증 -
+**주의**: 실제 로봇 스택이 이미 떠 있는 상태에서 이 테스트를 돌리면 `/safety/state`,
+`hmi/task_status/*` 같은 운영 토픽에 테스트용 가짜 메시지가 실제로 발행돼 대시보드에
+잠깐 섞여 보일 수 있다 - 로봇 스택이 안 떠 있을 때만 돌릴 것).
 `-p no:anyio`가 필요한 이유: `python-socketio[client]`가 끌어온 `anyio`가 이 환경의
 구버전 시스템 pytest(6.2.5)와 안 맞는 pytest 플러그인을 등록해서 죽는 문제가 있음.
 
@@ -77,6 +88,31 @@ src/hmi_ros_bridge/test/test_bridge_node.py -p no:anyio` (실제 rclpy 그래프
 설정 없이 동작한다 - React가 `@react-three/fiber`로 `data/world_maps/`의
 저장된 스캔을 직접 렌더링한다(기존 hmi_bridge의 iframe 뷰어를 대체, 그쪽은
 계속 무수정 병행 운영).
+
+## 전체 실행 순서 (로봇 실기 기준, 터미널 6개)
+
+```bash
+# 1) 로봇 드라이버 (직접)
+ros2 launch dsr_bringup2 dsr_bringup2_rviz.launch.py mode:=real host:=<로봇IP> model:=m0609
+
+# 2) RealSense 카메라 (직접)
+ros2 launch realsense2_camera rs_align_depth_launch.py ...
+
+# 3) pick-and-place 애플리케이션 노드 전부 (기존 my_robot_pkg, 무수정)
+ros2 launch my_robot_pkg pnp_bringup.launch.py
+
+# 4) HMI ROS 노드 2개 (신규)
+ros2 launch hmi_ros_bridge hmi_bringup.launch.py
+
+# 5) hmi/backend
+cd hmi/backend && unset PYTHONPATH && .venv/bin/python run.py
+
+# 6) hmi/frontend
+cd hmi/frontend && npm run dev
+```
+1)/2)가 먼저 떠 있어야 3)의 pick/place 동작이 실제로 성공한다(3)/4)는 순서 상관없이
+서로 기다리며 재시도한다). 5)/6)은 ROS 노드가 아니라서 launch에 안 넣었다(venv/npm
+활성화 필요, 로그/재시작 관리가 launch보다 직접 터미널이 편함).
 
 ## 프로덕션 실행 구조 (아직 미확정, 후속 작업)
 
