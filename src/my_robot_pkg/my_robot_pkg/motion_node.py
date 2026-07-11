@@ -16,6 +16,7 @@
 #     실시간 반영되고, move_linear()의 폴링 루프가 그 이벤트를 본다.
 #   • dsr_lock — amovel/check_motion/get_current_posx/stop 등 dsr_node를 건드리는
 #     호출을 직렬화(global executor 재진입 방지).
+import json
 import os
 import sys
 import threading
@@ -33,7 +34,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 import DR_init
 
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from od_msg.srv import SrvDepthPosition, SrvVisibilityCheck
 from dsr_msgs2.srv import MoveStop
 from ament_index_python.packages import get_package_share_directory
@@ -161,6 +162,11 @@ class MotionNode(Node):
         self.pick_logger = PickLogger()
         self.last_grasp_delta_deg = None  # get_target_pos()가 채움, get_last_grasp_delta()로 노출
 
+        # 2026-07-12: HMI Performance 탭의 RL 스텝별 오차 차트용 - move_via_rl()이
+        # 매 스텝 _publish_rl_step으로 호출한다(hmi/vision_detections와 동일하게
+        # JSON을 실은 String, hmi_ros_bridge/bridge_node.py가 구독해 Socket.IO로 중계).
+        self.rl_step_pub = self.create_publisher(String, "hmi/rl_reach_progress", 10)
+
         # Action 서버의 goal/result/cancel 서비스가 blocking execute 콜백과 "동시에"
         # 처리돼야 클라이언트(brain)가 결과를 받는다. MutuallyExclusive로 묶으면
         # execute가 도는 동안 같은 그룹인 result 응답 서비스가 막혀서 brain이 결과를
@@ -216,6 +222,7 @@ class MotionNode(Node):
             get_current_posx=lambda: get_current_posx(ref=DR_BASE),
             cancel_event=cancel_event,
             get_grasp_delta=self.get_last_grasp_delta,
+            on_rl_step=self._publish_rl_step,
         )
 
         # Action servers
@@ -528,6 +535,10 @@ class MotionNode(Node):
     def get_last_grasp_delta(self):
         """MotionExecutor.pick()이 log_attempt()에 실어보낼 최근 grasp 정렬 delta(deg)."""
         return self.last_grasp_delta_deg
+
+    def _publish_rl_step(self, payload):
+        """MotionExecutor.move_via_rl()이 매 스텝 호출하는 on_rl_step 콜백."""
+        self.rl_step_pub.publish(String(data=json.dumps(payload)))
 
     def get_target_pos(self, label):
         """realsense로 label의 depth를 찍어 베이스 좌표 + grasp orientation을 반환한다."""

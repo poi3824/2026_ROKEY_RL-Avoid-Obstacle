@@ -54,6 +54,13 @@ class RosNamespace(Namespace):
     def on_voice_log(self, data):
         self._relay("voice_log", data)  # 로그 스트림은 "상태"가 아니라 캐시 안 함
 
+    def on_rl_reach_progress(self, data):
+        # move_via_rl() 한 에피소드의 스텝 스트림 - voice_log와 동일하게 "최신값"이
+        # 아니라 누적해서 봐야 하는 데이터라 cache_key로 캐싱하지 않는다(새로 붙은
+        # 탭은 진행 중이던 에피소드의 과거 스텝을 못 보고 다음 스텝부터 보게 됨 -
+        # voice_log와 같은 한계, 허용 가능한 트레이드오프).
+        self._relay("rl_reach_progress", data)
+
     def on_safety_status(self, data):
         try:
             validate("safety_status.schema.json", data)

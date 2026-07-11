@@ -38,6 +38,12 @@ TASK_STATUS_TOPICS = {
     "hmi/task_status/world_map": "world_map",
 }
 
+# 2026-07-12: motion_executor.move_via_rl()이 매 스텝 발행 - HMI Performance 탭의
+# RL 스텝별 오차 차트가 실시간으로 그리도록 publish_event로 그대로 중계한다(스텝
+# 하나하나가 다 의미 있는 순서 데이터라 publish_state의 최신값-슬롯 모델과는 안 맞음 -
+# emit_channel.py 모듈 docstring의 "이벤트" 분류 참고).
+RL_STEP_TOPIC = "hmi/rl_reach_progress"
+
 # TRANSIENT_LOCAL 발행자(safety_monitor_node, brain_node, world_map_node)와
 # 매칭되는 구독 QoS - 늦게 뜬 이 브릿지도 마지막 상태를 바로 받는다.
 _LATCHED_QOS = QoSProfile(
@@ -75,8 +81,9 @@ class BridgeNode(Node):
                 lambda msg, source=source: self._on_task_status(msg, source),
                 _LATCHED_QOS,
             )
+        self.create_subscription(String, RL_STEP_TOPIC, self._on_rl_step, 10)
 
-        self.get_logger().info("hmi_ros_bridge 시작 - voice/safety/task_status 구독, 서비스 준비 완료")
+        self.get_logger().info("hmi_ros_bridge 시작 - voice/safety/task_status/rl_reach_progress 구독, 서비스 준비 완료")
 
     def _on_voice_state(self, msg):
         self._state = msg.data
@@ -120,6 +127,14 @@ class BridgeNode(Node):
             return
         payload = {"source": source, "status": status}
         self._emit.publish_state(f"task_status:{source}", "task_status", payload)
+
+    def _on_rl_step(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except (ValueError, TypeError):
+            self.get_logger().warn(f"rl_reach_progress JSON 파싱 실패, 무시: {msg.data!r}")
+            return
+        self._emit.publish_event("rl_reach_progress", payload)
 
     def _sweep_seen_commands(self, now):
         expired = [cid for cid, (expire_at, _ack) in self._seen_commands.items() if expire_at < now]

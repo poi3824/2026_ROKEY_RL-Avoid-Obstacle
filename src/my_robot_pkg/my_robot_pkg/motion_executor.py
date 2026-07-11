@@ -16,6 +16,7 @@
 import contextlib
 import time
 import copy
+import uuid
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -87,7 +88,7 @@ class MotionExecutor:
         get_surface_z=None, redetect=None, grip_min_width=None, logger=None,
         check_motion=None, estop_event=None, hand_pause_event=None,
         dsr_lock=None, amovej=None, get_current_posj=None, get_current_posx=None,
-        cancel_event=None, get_grasp_delta=None,
+        cancel_event=None, get_grasp_delta=None, on_rl_step=None,
     ):
         self._movel = movel  # amovel을 주입받는다 (위 모듈 주석 참고)
         self._movej = movej
@@ -112,6 +113,9 @@ class MotionExecutor:
         self.grip_min_width = grip_min_width if grip_min_width is not None else DEFAULT_GRIP_MIN_WIDTH
         self.logger = logger  # pick_logger.PickLogger를 주입받음 (없으면 기록 생략)
         self.get_grasp_delta = get_grasp_delta  # motion_node.get_last_grasp_delta를 주입받음 (없으면 None 기록)
+        # 2026-07-12: move_via_rl()이 매 스텝 호출 - motion_node가 hmi/rl_reach_progress로
+        # 발행하도록 주입받음(없으면 print()만 하고 넘어감, 기존 동작 그대로).
+        self.on_rl_step = on_rl_step
         self._check_motion = check_motion  # DSR_ROBOT2.check_motion을 주입받음
         self._estop_event = estop_event  # robot_action_node의 threading.Event를 주입받음
         # 2026-07-07: object_detection_node가 /hand_detected 토픽으로 발행하는 걸
@@ -501,7 +505,13 @@ class MotionExecutor:
         # 그대로 써서(_align_tcp_vertical과 동일한 함수) 실제 TCP가 도달해야 할 지점을 구한다.
         target_pos_m = rl.flange_posx_to_tcp_pos_m(target_pos)
 
+        # 2026-07-12: HMI Performance 탭의 RL 스텝별 오차 차트용 - 호출 1번(= 에피소드
+        # 1개)마다 새 id를 발급해서 on_rl_step 구독 쪽(프론트)이 "새 에피소드 시작"을
+        # step==0 여부가 아니라 이 id 변화로 판단하게 한다(이벤트 유실에도 안전).
+        episode_id = str(uuid.uuid4())
+
         prev_action = np.zeros(6, dtype=np.float32)
+        pos_err_m = None  # max_steps=0(호출 안 됨)이면 아래 max_steps 도달 이벤트가 None을 그대로 보냄
         for step in range(max_steps):
             with self._dsr_lock:
                 current_posj_deg = self._get_current_posj()
@@ -515,6 +525,10 @@ class MotionExecutor:
                 print(
                     f"[MotionExecutor] RL reach 중단: joint_{worst + 1} 목표가 물리 한계 "
                     f"안전마진 안으로 들어옴 ({step}스텝째)"
+                )
+                self._emit_rl_step(
+                    episode_id, step, None, goal_threshold_m, max_steps,
+                    done=True, reason="joint_limit_abort",
                 )
                 return False
 
@@ -531,10 +545,36 @@ class MotionExecutor:
 
             if pos_err_m < goal_threshold_m:
                 print(f"[MotionExecutor] RL reach 목표 도달 ({step + 1}스텝, {pos_err_m * 100:.1f}cm)")
+                self._emit_rl_step(
+                    episode_id, step, pos_err_m, goal_threshold_m, max_steps,
+                    done=True, reason="goal_reached",
+                )
                 return True
 
+            self._emit_rl_step(episode_id, step, pos_err_m, goal_threshold_m, max_steps, done=False)
+
         print(f"[MotionExecutor] RL reach: max_steps({max_steps}) 도달, 목표 미도달")
+        self._emit_rl_step(
+            episode_id, max_steps - 1, pos_err_m, goal_threshold_m, max_steps,
+            done=True, reason="max_steps",
+        )
         return False
+
+    def _emit_rl_step(self, episode_id, step, pos_err_m, goal_threshold_m, max_steps, done, reason=None):
+        """on_rl_step 콜백이 있으면 HMI용 페이로드로 감싸 호출한다(없으면 조용히 무시 -
+        기존 print() 기반 동작과 100% 동일하게 유지). pos_err_m은 joint_limit_abort처럼
+        아직 한 번도 못 구했을 수 있어 None을 허용한다."""
+        if self.on_rl_step is None:
+            return
+        self.on_rl_step({
+            "episode_id": episode_id,
+            "step": step,
+            "pos_err_mm": None if pos_err_m is None else pos_err_m * 1000.0,
+            "goal_threshold_mm": goal_threshold_m * 1000.0,
+            "max_steps": max_steps,
+            "done": done,
+            "reason": reason,
+        })
 
     def _align_tcp_vertical(self, target_orientation):
         """move_via_rl()이 멈춘 자리에서 TCP 위치는 고정한 채 orientation만

@@ -1,5 +1,6 @@
 import RlErrorTrend from "../panels/RlErrorTrend";
 import GraspAngleGauge from "../panels/GraspAngleGauge";
+import { useRlReachProgress } from "../../hooks/useRlReachProgress";
 
 // pickAttempts는 useDbData()가 id DESC로 이미 정렬해서 준다 - 맨 앞부터 훑어서
 // angle_delta_deg가 채워진(마이그레이션 이후 기록된) 첫 행을 최신값으로 쓴다.
@@ -11,6 +12,7 @@ function latestGraspDelta(pickAttempts) {
 
 export default function PerformancePage({ summary, pickAttempts }) {
   const graspDelta = latestGraspDelta(pickAttempts);
+  const rl = useRlReachProgress();
 
   return (
     <div>
@@ -21,7 +23,11 @@ export default function PerformancePage({ summary, pickAttempts }) {
         <div className="kpi"><div className="label">오늘 성공률</div><div className="value">{summary?.success_rate != null ? summary.success_rate + "%" : "–"}</div></div>
       </div>
       <div className="split-row">
-        <RlErrorTrend />
+        {rl.steps.length > 0 ? (
+          <RlErrorTrend steps={rl.steps} goalThresholdMm={rl.goalThresholdMm} isMock={false} />
+        ) : (
+          <RlErrorTrend />
+        )}
         {graspDelta != null ? (
           <GraspAngleGauge deltaDeg={graspDelta} isMock={false} />
         ) : (
