@@ -905,9 +905,20 @@ RESUME / RESUME / RESUME / RESUME
 def main():  # d2 메인문 일부 수정
     rclpy.init()
     node = GetKeyword()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    # 2026-07-11: rclpy.spin()을 try/except/finally로 안 감싸고 있었다 - SIGINT로
+    # KeyboardInterrupt가 올라오면 곧바로 destroy_node()/shutdown()을 건너뛰고
+    # 프로세스를 빠져나가는데, 이 사이 마이크 스트림(pyaudio, _listen_thread)이
+    # 제대로 안 정리되면서 Ctrl+C 후 재실행 시 이전 프로세스가 남아 있는 것처럼
+    # 보였다(웨이크워드/STT 로그가 두 번씩 찍힘 - 실기 확인). 이 저장소의 다른
+    # 모든 노드(hmi_ros_bridge, brain_node, world_map_node 등)와 동일한 패턴으로 맞춘다.
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
