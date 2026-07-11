@@ -2,6 +2,7 @@ import { useState } from "react";
 import AppShell from "./components/layout/AppShell";
 import NodeStatus from "./components/panels/NodeStatus";
 import TaskProgress from "./components/panels/TaskProgress";
+import KpiStrip from "./components/panels/KpiStrip";
 import VoiceConsole from "./components/panels/VoiceConsole";
 import VisionPanel from "./components/panels/VisionPanel";
 import RobotViewer from "./components/panels/RobotViewer";
@@ -46,6 +47,7 @@ export default function App() {
             </div>
           </div>
           <TaskProgress tasks={taskStatus} safety={safetyStatus} />
+          <KpiStrip summary={db.summary} error={db.error} />
         </div>
       )}
 
