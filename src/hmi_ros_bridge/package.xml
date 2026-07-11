@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hmi_ros_bridge</name>
+  <version>0.0.0</version>
+  <description>ROS 2 Topic/Service/Action과 hmi/backend(Flask-SocketIO) 사이의 전용 Bridge Node. python-socketio Client로 hmi/backend의 "/ros" 네임스페이스에 Bridge Token 인증으로 접속해 ROS 이벤트를 relay한다. Flask는 ROS를 직접 붙잡지 않는다는 hmi_bridge/hmi_interface의 원칙을 그대로 잇는다.</description>
+  <maintainer email="poi3824@gmail.com">soo</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>rcl_interfaces</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

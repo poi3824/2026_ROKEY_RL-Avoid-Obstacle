@@ -8,23 +8,26 @@ import RobotViewer from "./components/panels/RobotViewer";
 import DatabasePage from "./components/pages/DatabasePage";
 import PerformancePage from "./components/pages/PerformancePage";
 import SettingsPage from "./components/pages/SettingsPage";
-import {
-  MOCK_SAFETY_STATUS, MOCK_TASK_STATUS, MOCK_VOICE_STATUS, MOCK_VOICE_LOGS,
-  MOCK_BRIDGE_CONNECTED,
-} from "./mock/data";
+import { MOCK_SAFETY_STATUS, MOCK_TASK_STATUS } from "./mock/data";
 import { useDbData } from "./hooks/useDbData";
+import { useBridgeStatus } from "./hooks/useBridgeStatus";
+import { useVoiceStatus } from "./hooks/useVoiceStatus";
 
-// Phase 1: SafetyStatus/TaskProgress/VoiceConsole은 아직 mock (Phase 3/5에서 Socket.IO로 교체).
-// Phase 2: DatabasePage/PerformancePage는 useDbData()로 실제 REST API(hmi/backend)에 연결됨 -
-// 기존 hmi_interface(:5050)/hmi_bridge(:5000)는 계속 별도로 병행 운영 중.
+// Phase 1: SafetyStatus/TaskProgress는 아직 mock (Phase 5에서 Socket.IO로 교체).
+// Phase 2: DatabasePage/PerformancePage는 useDbData()로 실제 REST API(hmi/backend)에 연결됨.
+// Phase 3: VoiceConsole/bridge_status는 useVoiceStatus()/useBridgeStatus()로 실제
+// Socket.IO(hmi_ros_bridge -> hmi/backend -> 브라우저)에 연결됨 - 기존
+// hmi_interface(:5050)/hmi_bridge(:5000)는 계속 별도로 병행 운영 중.
 export default function App() {
   const [activeId, setActiveId] = useState("dashboard");
   const [selectedScanId, setSelectedScanId] = useState(null);
   const [yoloEnabled, setYoloEnabled] = useState(false);
   const db = useDbData();
+  const bridgeConnected = useBridgeStatus();
+  const { voice, logs: voiceLogs, toggleRecord } = useVoiceStatus();
 
   return (
-    <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={MOCK_BRIDGE_CONNECTED}>
+    <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={bridgeConnected}>
       {activeId === "dashboard" && (
         <div>
           <SafetyStatus status={MOCK_SAFETY_STATUS} />
@@ -37,7 +40,7 @@ export default function App() {
       )}
 
       {activeId === "voice" && (
-        <VoiceConsole voice={MOCK_VOICE_STATUS} logs={MOCK_VOICE_LOGS} onToggleRecord={() => {}} />
+        <VoiceConsole voice={voice} logs={voiceLogs} onToggleRecord={toggleRecord} />
       )}
 
       {activeId === "vision" && (

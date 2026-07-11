@@ -1,7 +1,7 @@
 # hmi/ - React + Flask-SocketIO 통합 HMI (재구축 중)
 
 이 디렉터리는 콜콘(colcon) 패키지가 아닌 일반 웹 프로젝트다. ROS와의 유일한
-접점은 `src/hmi_ros_bridge`(Phase 3에서 생성 예정)가 `/ros` Socket.IO
+접점은 `src/hmi_ros_bridge`(Phase 3에서 생성됨)가 `/ros` Socket.IO
 네임스페이스에 클라이언트로 붙는 것뿐이며, 이 안의 Flask 프로세스는 rclpy를
 직접 import하지 않는다.
 
@@ -51,6 +51,24 @@ cp .env.example .env
 npm install
 npm run dev                     # http://localhost:5173, Vite dev server
 ```
+
+### 4. hmi_ros_bridge (ROS 2 패키지)
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select hmi_ros_bridge   # 저장소 루트에서
+source install/setup.bash
+ros2 run hmi_ros_bridge hmi_ros_bridge_server
+```
+`hmi/backend/.env`를 자동으로 읽어 `HMI_BRIDGE_TOKEN`/`HMI_BACKEND_*`를 공유한다
+(다른 위치를 쓰려면 `HMI_ROS_BRIDGE_ENV_FILE` 환경변수로 지정). `python-socketio[client]`,
+`python-dotenv`는 시스템/사용자 Python에 `pip install --user`로 설치되어 있어야 한다
+(이 워크스페이스가 이미 `websockets`를 그렇게 설치해 쓰는 것과 동일한 관행).
+
+테스트: `python3 -m pytest src/hmi_ros_bridge/test/test_emit_channel.py -p no:anyio`
+(순수 로직, ROS 불필요), `source /opt/ros/humble/setup.bash && python3 -m pytest
+src/hmi_ros_bridge/test/test_bridge_node.py -p no:anyio` (실제 rclpy 그래프로 검증).
+`-p no:anyio`가 필요한 이유: `python-socketio[client]`가 끌어온 `anyio`가 이 환경의
+구버전 시스템 pytest(6.2.5)와 안 맞는 pytest 플러그인을 등록해서 죽는 문제가 있음.
 
 ## 프로덕션 실행 구조 (목표, Phase 6에서 확정)
 
