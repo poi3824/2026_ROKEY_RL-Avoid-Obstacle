@@ -9,6 +9,16 @@
 # 뒤 끊어졌을 때"만 자동으로 동작하고, 맨 처음 connect() 자체가 실패하면(예: Flask가
 # 아직 안 떠 있음) 예외를 던지고 끝난다 - 그래서 최초 연결은 별도 스레드에서 지수
 # 백오프로 재시도한다(cold-start 시나리오 커버).
+#
+# 2026-07-11 실기 버그: `ros2 run hmi_ros_bridge hmi_ros_bridge_server`를 Ctrl+C로
+# 못 죽이는 문제 발견. 원인: socketio.Client(handle_sigint=True, 기본값)가 생성자에서
+# SIGINT 핸들러를 자기 것으로 통째로 교체한다(socketio/base_client.py의 signal_handler -
+# reconnecting_clients를 정지시킨 뒤 "원래 핸들러"를 체인 호출하는 구조인데, 이 프로세스는
+# 로봇 하드웨어를 직접 제어하지 않는 순수 브릿지라 socketio 쪽 종료 처리가 필요 없고,
+# 오히려 rclpy.init()이 등록한 SIGINT 처리와 충돌해 rclpy.spin()이 아예 안 깨어난다 -
+# py-spy/최소 재현 스크립트로 실제 확인: rclpy.spin() + socketio.Client() 생성만 해도
+# (connect() 호출 전, 스레드 시작 전이어도) 재현됨. handle_sigint=False로 socketio가
+# 아예 손대지 않게 하면 rclpy 쪽 SIGINT 처리가 정상 동작한다.
 import logging
 import threading
 import time
@@ -34,6 +44,7 @@ class SocketioWorker:
 
         self.client = socketio.Client(
             reconnection=True, reconnection_delay=1, reconnection_delay_max=10,
+            handle_sigint=False,  # rclpy.init()의 SIGINT 처리와 충돌 방지 (위 주석 참고)
         )
 
         @self.client.event(namespace=NAMESPACE)
