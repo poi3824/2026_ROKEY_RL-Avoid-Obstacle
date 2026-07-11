@@ -22,6 +22,14 @@ class BrowserNamespace(Namespace):
     def on_connect(self):
         logger.info("browser connected sid=%s", request.sid)
         emit("bridge_status", {"connected": self.state.bridge_connected})
+        # Socket.IO는 ROS TRANSIENT_LOCAL 같은 재전송이 없어서, 새로 붙은 탭에
+        # 마지막으로 알려진 voice_status/safety_status/task_status를 여기서
+        # 직접 재생해준다 - 안 그러면 다음 갱신이 올 때까지 화면이 비어 보인다
+        # (실기 확인: 헤드리스 브라우저로 열었더니 Safety/Task가 계속
+        # "알 수 없음"으로 나왔음 - fake talker가 이 탭이 붙기 전에 이미
+        # 발행을 끝낸 상황이었음).
+        for event, payload in self.state.all_last_known():
+            emit(event, payload)
 
     def on_disconnect(self):
         logger.info("browser disconnected sid=%s", request.sid)

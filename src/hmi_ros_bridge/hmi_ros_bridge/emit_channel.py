@@ -23,14 +23,20 @@ logger = logging.getLogger("hmi_ros_bridge.emit_channel")
 class EmitChannel:
     def __init__(self, event_queue_maxsize=500):
         self._lock = threading.Lock()
-        self._latest = {}  # event_name -> payload
-        self._dirty = set()  # event_name들 - drain 대상
+        self._latest = {}  # slot_key -> (event_name, payload)
+        self._dirty = set()  # slot_key들 - drain 대상
         self._events = queue.Queue(maxsize=event_queue_maxsize)
 
-    def publish_state(self, event_name, payload):
+    def publish_state(self, slot_key, event_name, payload):
+        """slot_key는 순수 내부 식별자(starvation 방지용 슬롯 분리에만 쓰임),
+        event_name이 실제 Socket.IO에 나가는 이벤트 이름이다 - 이 둘이 다를 수
+        있다(예: task_status:manipulation, task_status:world_map 두 슬롯이 전부
+        event_name="task_status"로 나가야 하는 경우, source는 payload 안에서
+        구분). 슬롯 키를 그대로 이벤트 이름으로 쓰면 여러 소스가 같은 이벤트
+        이름 하나로 통합 발행돼야 하는 경우를 표현할 수 없다."""
         with self._lock:
-            self._latest[event_name] = payload
-            self._dirty.add(event_name)
+            self._latest[slot_key] = (event_name, payload)
+            self._dirty.add(slot_key)
 
     def publish_event(self, event_name, payload):
         try:
@@ -48,7 +54,7 @@ class EmitChannel:
 
     def drain_dirty_states(self):
         with self._lock:
-            items = [(name, self._latest[name]) for name in self._dirty]
+            items = [self._latest[key] for key in self._dirty]
             self._dirty.clear()
         return items
 

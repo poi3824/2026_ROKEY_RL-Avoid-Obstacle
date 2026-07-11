@@ -8,19 +8,22 @@ import RobotViewer from "./components/panels/RobotViewer";
 import DatabasePage from "./components/pages/DatabasePage";
 import PerformancePage from "./components/pages/PerformancePage";
 import SettingsPage from "./components/pages/SettingsPage";
-import { MOCK_SAFETY_STATUS, MOCK_TASK_STATUS } from "./mock/data";
 import { useDbData } from "./hooks/useDbData";
 import { useBridgeStatus } from "./hooks/useBridgeStatus";
 import { useVoiceStatus } from "./hooks/useVoiceStatus";
 import { useVisionStream } from "./hooks/useVisionStream";
+import { useSafetyStatus } from "./hooks/useSafetyStatus";
+import { useTaskStatus } from "./hooks/useTaskStatus";
 
-// Phase 1: SafetyStatus/TaskProgress는 아직 mock (Phase 5에서 Socket.IO로 교체).
 // Phase 2: DatabasePage/PerformancePage는 useDbData()로 실제 REST API(hmi/backend)에 연결됨.
 // Phase 3: VoiceConsole/bridge_status는 useVoiceStatus()/useBridgeStatus()로 실제
 // Socket.IO(hmi_ros_bridge -> hmi/backend -> 브라우저)에 연결됨.
 // Phase 4: VisionPanel은 useVisionStream()으로 hmi_vision_stream(MJPEG, 8767)에
 // 연결 - 자체 YOLO 로드 없이 object_detection_node의 hmi/vision_detections를 재사용.
-// 기존 hmi_interface(:5050, vision_bridge 8766)/hmi_bridge(:5000)는 계속 병행 운영 중.
+// Phase 5: SafetyStatus/TaskProgress는 useSafetyStatus()/useTaskStatus()로 실제
+// /safety/state, hmi/task_status/{manipulation,world_map}에 연결됨 - 두 모델을
+// 절대 섞지 않는다(합의된 원칙). 기존 hmi_interface(:5050)/hmi_bridge(:5000)는
+// 계속 병행 운영 중.
 export default function App() {
   const [activeId, setActiveId] = useState("dashboard");
   const [selectedScanId, setSelectedScanId] = useState(null);
@@ -28,13 +31,15 @@ export default function App() {
   const bridgeConnected = useBridgeStatus();
   const { voice, logs: voiceLogs, toggleRecord } = useVoiceStatus();
   const vision = useVisionStream();
+  const safetyStatus = useSafetyStatus();
+  const taskStatus = useTaskStatus();
 
   return (
     <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={bridgeConnected}>
       {activeId === "dashboard" && (
         <div>
-          <SafetyStatus status={MOCK_SAFETY_STATUS} />
-          <TaskProgress tasks={MOCK_TASK_STATUS} />
+          <SafetyStatus status={safetyStatus} />
+          <TaskProgress tasks={taskStatus} />
           <div className="split-row">
             <VisionPanel vision={vision} />
             <RobotViewer />

@@ -27,6 +27,24 @@ class HmiState:
         # (terminal task_status를 만났을 때 command_result를 합성해 보낼 대상 찾기용)
         self._pending_control = {}
 
+        # cache_key -> (event_name, payload) : ROS 쪽에서 온 "상태성" 이벤트의
+        # 마지막 값. Socket.IO 자체에는 ROS TRANSIENT_LOCAL 같은 재전송 기능이
+        # 없어서, 새 브라우저 탭이 붙었을 때(또는 재연결) 마지막 상태를 즉시
+        # 못 받고 다음 갱신까지 빈 화면으로 보이는 문제가 있었다(실기 확인:
+        # 헤드리스 브라우저로 대시보드를 열었더니 Safety/Task가 계속
+        # "알 수 없음"으로 나왔음 - fake talker가 브라우저 접속보다 먼저 발행을
+        # 끝내버린 상황). voice_log처럼 "각 항목이 독립적인 이벤트 스트림"은
+        # 여기 캐시하지 않는다(cache_key는 record_last_known 호출부가 직접 고른다).
+        self._last_known = {}
+
+    def record_last_known(self, cache_key, event_name, payload):
+        with self._lock:
+            self._last_known[cache_key] = (event_name, payload)
+
+    def all_last_known(self):
+        with self._lock:
+            return list(self._last_known.values())
+
     @property
     def bridge_connected(self):
         with self._lock:

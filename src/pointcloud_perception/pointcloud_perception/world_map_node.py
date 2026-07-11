@@ -22,7 +22,9 @@
 # 스캔 경로 생성, TF/ROI 적용, ground z 보정, ICP 잔차보정, 클러스터링/저장 같은
 # 순수 알고리즘은 world_map_algo.py로 분리되어 있다 - rclpy 등 ROS 의존성이 없어야
 # offline_icp_experiment.py가 ROS 워크스페이스 없이 저장된 스캔으로 튜닝할 수 있다.
+import json
 import time
+import uuid
 
 import numpy as np
 import rclpy
@@ -33,6 +35,7 @@ from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, Du
 
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 
@@ -356,8 +359,15 @@ class ScanWorker(Node):
             return np.empty((0, 3), dtype=np.float64)
         return np.vstack(collected)
 
-    def run_scan(self):
-        """스캔 경로를 훑으면서 point cloud를 base_link 기준으로 merge해서 반환한다."""
+    def run_scan(self, on_pose_progress=None):
+        """스캔 경로를 훑으면서 point cloud를 base_link 기준으로 merge해서 반환한다.
+
+        on_pose_progress(step_index, step_total, pose_type)는 매 포즈 이동을
+        시작할 때 호출된다(2026-07-11, HMI 재구축 Phase 5) - world_map_node가
+        이걸로 hmi/task_status/world_map 진행률을 발행한다. ScanWorker 자체는
+        task_id/HMI를 전혀 모른다(WorldMapNode가 콜백으로 주입) - 순수 콜백
+        훅 하나만 추가한 것이라 스캔 로직 자체는 무변경이다.
+        """
         if not self.wait_for_move_line_service(timeout_sec=5.0):
             raise RuntimeError(f"MoveLine 서비스({MOVE_LINE_SERVICE})를 찾을 수 없습니다.")
 
@@ -367,6 +377,9 @@ class ScanWorker(Node):
 
         for i, pose in enumerate(poses):
             pose_type = "flat" if is_flat_pose(pose) else "side"
+
+            if on_pose_progress is not None:
+                on_pose_progress(i, len(poses), pose_type)
 
             self.get_logger().info(
                 f"moving pose {i:03d}/{len(poses)-1:03d}: "
@@ -476,27 +489,73 @@ class WorldMapNode(Node):
         self.obstacle_pub = self.create_publisher(WorldMapUpdate, "/world_map/obstacles", world_map_qos)
         self.update_srv = self.create_service(Trigger, "update_world_map", self.handle_update)
 
+        # 2026-07-11 (HMI 재구축 Phase 5): HMI 대시보드용 월드맵 스캔 진행 상태.
+        # hmi/task_status/manipulation(brain_node가 발행)과 별개 토픽 -
+        # hmi_ros_bridge가 두 토픽을 구독 소스 기준으로 태깅해서 하나의
+        # Socket.IO task_status 이벤트로 통합한다. QoS는 world_map_qos와 동일한
+        # TRANSIENT_LOCAL 패턴(늦게 붙는 hmi_ros_bridge도 마지막 상태를 바로 받음).
+        self.task_status_pub = self.create_publisher(
+            String, "hmi/task_status/world_map", world_map_qos
+        )
+
         self.get_logger().info("world_map_node ready. waiting for /update_world_map calls...")
+
+    def _publish_task_status(
+        self, task_id, status, step_index=None, step_total=None,
+        title="", detail="", phase="",
+    ):
+        """task_status.schema.json 형태 JSON을 발행한다. status는 IDLE/WAITING/
+        RUNNING/COMPLETED/FAILED만 쓴다(Safety RUN/PAUSE/ESTOP과 절대 섞지 않는다)."""
+        self.task_status_pub.publish(String(data=json.dumps({
+            "task_id": task_id,
+            "mode": "world_map_scan",
+            "phase": phase,
+            "title": title,
+            "detail": detail,
+            "step_index": step_index,
+            "step_total": step_total,
+            "progress": (step_index / step_total) if step_total else None,
+            "status": status,
+            "timestamp": time.time(),
+        })))
 
     def handle_update(self, request, response):
         self.get_logger().info("World map update requested.")
 
+        task_id = str(uuid.uuid4())
+        self._publish_task_status(task_id, "RUNNING", title="월드맵 스캔", phase="starting")
+
+        def on_pose_progress(step_index, step_total, pose_type):
+            self._publish_task_status(
+                task_id, "RUNNING", step_index=step_index, step_total=step_total,
+                title="월드맵 스캔", detail=f"pose {step_index}/{step_total} ({pose_type})",
+                phase="scanning",
+            )
+
         try:
             merged_points, poses, per_pose_points, ground_z_alignment, icp_mapping_report = (
-                self.worker.run_scan()
+                self.worker.run_scan(on_pose_progress=on_pose_progress)
             )
         except Exception as e:
             self.get_logger().error(f"scan failed: {e}")
             response.success = False
             response.message = f"scan failed: {e}"
+            self._publish_task_status(
+                task_id, "FAILED", title="월드맵 스캔", detail=str(e), phase="scan_failed",
+            )
             return response
 
         if merged_points.shape[0] == 0:
             self.get_logger().warn("No points captured during scan.")
             response.success = False
             response.message = "no points captured"
+            self._publish_task_status(
+                task_id, "FAILED", title="월드맵 스캔",
+                detail="no points captured", phase="scan_failed",
+            )
             return response
 
+        self._publish_task_status(task_id, "RUNNING", title="월드맵 스캔", phase="clustering")
         try:
             ground_z = ground_z_alignment.get("reference_ground_z")
             clusters = cluster_points(merged_points, ground_z=ground_z)
@@ -504,6 +563,9 @@ class WorldMapNode(Node):
             self.get_logger().error(f"clustering failed: {e}")
             response.success = False
             response.message = f"clustering failed: {e}"
+            self._publish_task_status(
+                task_id, "FAILED", title="월드맵 스캔", detail=str(e), phase="clustering_failed",
+            )
             return response
 
         scan_dir = save_record(
@@ -528,6 +590,10 @@ class WorldMapNode(Node):
         )
         response.success = True
         response.message = f"{len(clusters)} obstacles detected, saved to {scan_dir}"
+        self._publish_task_status(
+            task_id, "COMPLETED", title="월드맵 스캔 완료",
+            detail=f"{len(clusters)}개 장애물 감지, {scan_dir}", phase="done",
+        )
         return response
 
     def destroy_node(self):

@@ -85,6 +85,40 @@ def test_full_command_roundtrip(app_and_sio):
     assert results[0]["args"][0]["command_id"] == command_id
 
 
+def test_late_joining_browser_gets_last_known_state(app_and_sio):
+    """실기로 발견한 버그의 회귀 테스트: 헤드리스 브라우저로 대시보드를 열었더니
+    safety_status/task_status가 계속 '알 수 없음'으로 나왔다 - fake talker가
+    이미 발행을 끝낸 뒤에 브라우저가 붙어서, 다음 갱신 전까지 아무것도 못 받은
+    것. Socket.IO는 ROS TRANSIENT_LOCAL 같은 재전송이 없으므로 Flask가 직접
+    캐시했다가 새 연결에 재생해야 한다."""
+    app, socketio = app_and_sio
+    bridge = socketio.test_client(app, namespace="/ros", auth={"token": Config.BRIDGE_TOKEN})
+    assert bridge.is_connected("/ros") is True
+
+    bridge.emit("safety_status", {"state": "ESTOP", "reason": "hand detected", "timestamp": 0}, namespace="/ros")
+    bridge.emit("task_status", {
+        "source": "manipulation",
+        "status": {"task_id": "t-1", "mode": "pick_place", "status": "RUNNING", "timestamp": 0},
+    }, namespace="/ros")
+    bridge.emit("task_status", {
+        "source": "world_map",
+        "status": {"task_id": "t-2", "mode": "world_map_scan", "status": "IDLE", "timestamp": 0},
+    }, namespace="/ros")
+
+    # 이 시점엔 아무 브라우저도 연결돼 있지 않았다 - 이제서야 새 탭이 붙는다.
+    late_browser = socketio.test_client(app, namespace="/")
+    events = late_browser.get_received("/")
+
+    safety_events = [e for e in events if e["name"] == "safety_status"]
+    assert len(safety_events) == 1, "새로 연결한 브라우저가 마지막 safety_status를 못 받음"
+    assert safety_events[0]["args"][0]["state"] == "ESTOP"
+
+    task_events = [e for e in events if e["name"] == "task_status"]
+    sources = {e["args"][0]["source"] for e in task_events}
+    assert sources == {"manipulation", "world_map"}, \
+        f"새로 연결한 브라우저가 두 source의 마지막 task_status를 다 못 받음: {sources}"
+
+
 def test_duplicate_command_id_rejected(app_and_sio):
     app, socketio = app_and_sio
     browser = socketio.test_client(app, namespace="/")

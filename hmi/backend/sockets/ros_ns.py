@@ -38,30 +38,40 @@ class RosNamespace(Namespace):
         logger.info("hmi_ros_bridge 연결 끊김 sid=%s", request.sid)
         emit("bridge_status", {"connected": False}, namespace="/", broadcast=True)
 
-    def _relay(self, event, data):
+    def _relay(self, event, data, cache_key=None):
+        """cache_key가 있으면 HmiState에 마지막 값으로 기록해둔다 - 새 브라우저
+        탭이 붙었을 때(browser_ns.on_connect) 다음 갱신을 기다리지 않고 즉시
+        재전송하기 위함이다(Socket.IO에는 ROS TRANSIENT_LOCAL 같은 재전송이
+        없어서, 이게 없으면 늦게 연결한 탭은 다음 이벤트가 올 때까지 빈 상태로
+        보인다 - 실기로 헤드리스 브라우저 스크린샷에서 확인한 문제)."""
+        if cache_key is not None:
+            self.state.record_last_known(cache_key, event, data)
         emit(event, data, namespace="/", broadcast=True)
 
     def on_voice_status(self, data):
-        self._relay("voice_status", data)
+        self._relay("voice_status", data, cache_key="voice_status")
 
     def on_voice_log(self, data):
-        self._relay("voice_log", data)
+        self._relay("voice_log", data)  # 로그 스트림은 "상태"가 아니라 캐시 안 함
 
     def on_safety_status(self, data):
         try:
             validate("safety_status.schema.json", data)
         except ValidationError as e:
             logger.warning("safety_status 스키마 불일치(그래도 relay): %s", e.message)
-        self._relay("safety_status", data)
+        self._relay("safety_status", data, cache_key="safety_status")
 
     def on_task_status(self, data):
         """data는 task_status_event.schema.json 형태({source, status}) - Bridge가
-        구독 토픽 기준으로 source를 이미 태깅해서 보낸다."""
+        구독 토픽 기준으로 source를 이미 태깅해서 보낸다. manipulation/world_map
+        각각 별도 cache_key로 저장해 서로 안 덮어쓴다(emit_channel.py의
+        slot_key/event_name 분리와 동일한 이유)."""
         try:
             validate("task_status_event.schema.json", data)
         except ValidationError as e:
             logger.warning("task_status 스키마 불일치(그래도 relay): %s", e.message)
-        self._relay("task_status", data)
+        source = (data or {}).get("source", "unknown")
+        self._relay("task_status", data, cache_key=f"task_status:{source}")
 
         status = (data or {}).get("status") or {}
         if status.get("status") in ("COMPLETED", "FAILED"):

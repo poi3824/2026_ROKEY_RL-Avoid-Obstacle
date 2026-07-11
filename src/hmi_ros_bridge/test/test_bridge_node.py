@@ -7,17 +7,26 @@ import os
 import sys
 import time
 
+import json
+
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float32, String
 from std_srvs.srv import SetBool
 from rcl_interfaces.msg import Log
+from robot_interfaces.msg import SafetyState
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hmi_ros_bridge.bridge_node import BridgeNode  # noqa: E402
 from hmi_ros_bridge.emit_channel import EmitChannel  # noqa: E402
+
+_LATCHED_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST, depth=1,
+    reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 
 class _FakeManualRecordService(Node):
@@ -53,6 +62,9 @@ def test_full_bridge_node_behavior():
         state_pub = talker.create_publisher(String, "/voice/state", 10)
         level_pub = talker.create_publisher(Float32, "/voice/level", 10)
         rosout_pub = talker.create_publisher(Log, "/rosout", 50)
+        safety_pub = talker.create_publisher(SafetyState, "/safety/state", _LATCHED_QOS)
+        manip_task_pub = talker.create_publisher(String, "hmi/task_status/manipulation", _LATCHED_QOS)
+        worldmap_task_pub = talker.create_publisher(String, "hmi/task_status/world_map", _LATCHED_QOS)
 
         executor = SingleThreadedExecutor()
         for n in (bridge, fake_service, talker):
@@ -122,6 +134,51 @@ def test_full_bridge_node_behavior():
         # --- 알 수 없는 action ---
         ack3 = bridge.handle_command({"command_id": "cmd-2", "action": "unknown.thing"})
         assert ack3["ok"] is False
+
+        # --- safety_status: /safety/state(무수정 토픽) -> latest-value 상태 ---
+        safety_msg = SafetyState()
+        safety_msg.state = SafetyState.ESTOP
+        safety_msg.reason = "hand detected"
+        safety_pub.publish(safety_msg)
+
+        safety_captured = {}
+
+        def safety_received():
+            for name, payload in emit_channel.drain_dirty_states():
+                if name == "safety_status":
+                    safety_captured["payload"] = payload
+            return "payload" in safety_captured
+
+        assert _spin_until(executor, safety_received), "safety_status가 relay되지 않음"
+        assert safety_captured["payload"]["state"] == "ESTOP"
+        assert safety_captured["payload"]["reason"] == "hand detected"
+
+        # --- task_status: manipulation/world_map 두 토픽이 서로 안 밀어내고
+        # 둘 다 event_name="task_status"로 나가는지(source는 payload 안에서 구분) ---
+        manip_msg = String(data=json.dumps({
+            "task_id": "t-1", "mode": "pick_place", "status": "RUNNING",
+            "phase": "", "title": "", "detail": "",
+            "step_index": 0, "step_total": 1, "progress": 0.0, "timestamp": 0,
+        }))
+        world_msg = String(data=json.dumps({
+            "task_id": "t-2", "mode": "world_map_scan", "status": "RUNNING",
+            "phase": "", "title": "", "detail": "",
+            "step_index": None, "step_total": None, "progress": None, "timestamp": 0,
+        }))
+        manip_task_pub.publish(manip_msg)
+        worldmap_task_pub.publish(world_msg)
+
+        task_events = []
+
+        def task_status_received():
+            task_events.extend(emit_channel.drain_dirty_states())
+            sources = {p["source"] for n, p in task_events if n == "task_status"}
+            return {"manipulation", "world_map"} <= sources
+
+        assert _spin_until(executor, task_status_received), \
+            f"task_status 두 소스가 모두 relay되지 않음: {task_events}"
+        assert all(name == "task_status" for name, _p in task_events), \
+            "task_status는 슬롯 키와 무관하게 항상 event_name='task_status'로 나가야 함"
 
         executor.shutdown()
         for n in (bridge, fake_service, talker):

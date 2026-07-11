@@ -10,9 +10,9 @@ from hmi_ros_bridge.emit_channel import EmitChannel  # noqa: E402
 
 def test_latest_state_coalesces_to_last_value():
     ch = EmitChannel()
-    ch.publish_state("voice_status", {"state": "idle", "level": 0.1})
-    ch.publish_state("voice_status", {"state": "recording", "level": 0.5})
-    ch.publish_state("voice_status", {"state": "recording", "level": 0.9})
+    ch.publish_state("voice_status", "voice_status", {"state": "idle", "level": 0.1})
+    ch.publish_state("voice_status", "voice_status", {"state": "recording", "level": 0.5})
+    ch.publish_state("voice_status", "voice_status", {"state": "recording", "level": 0.9})
 
     drained = ch.drain_dirty_states()
     assert drained == [("voice_status", {"state": "recording", "level": 0.9})]
@@ -23,12 +23,27 @@ def test_latest_state_coalesces_to_last_value():
 def test_latest_state_does_not_starve_other_topics():
     ch = EmitChannel()
     for i in range(1000):
-        ch.publish_state("voice_status", {"level": i})
-    ch.publish_state("safety_status", {"state": "ESTOP"})
+        ch.publish_state("voice_status", "voice_status", {"level": i})
+    ch.publish_state("safety_status", "safety_status", {"state": "ESTOP"})
 
     drained = dict(ch.drain_dirty_states())
     assert drained["safety_status"] == {"state": "ESTOP"}
     assert drained["voice_status"] == {"level": 999}
+
+
+def test_different_slot_keys_can_share_one_event_name():
+    """task_status:manipulation / task_status:world_map처럼 슬롯 키는 다르지만
+    Socket.IO에는 같은 event_name("task_status")으로 나가야 하는 경우."""
+    ch = EmitChannel()
+    ch.publish_state("task_status:manipulation", "task_status", {"source": "manipulation"})
+    ch.publish_state("task_status:world_map", "task_status", {"source": "world_map"})
+
+    drained = ch.drain_dirty_states()
+    assert len(drained) == 2
+    event_names = {name for name, _payload in drained}
+    assert event_names == {"task_status"}
+    sources = {payload["source"] for _name, payload in drained}
+    assert sources == {"manipulation", "world_map"}
 
 
 def test_events_are_delivered_in_order_not_coalesced():

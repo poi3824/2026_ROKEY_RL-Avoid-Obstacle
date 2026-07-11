@@ -9,8 +9,10 @@
 # 무거운 멀티스레드(로봇 제어)는 전부 motion_node에 있다. 여기는 상태머신 + Action
 # client + 단일 executor spin 스레드만 있어 가볍고, motion에 goal을 보낸 뒤에는
 # 비동기로 결과를 기다리므로(폴링) blocking 되지 않는다.
+import json
 import threading
 import time
+import uuid
 
 import rclpy
 from rclpy.node import Node
@@ -117,6 +119,18 @@ class BrainNode(Node):
             SafetyState, "/safety/state", self._on_safety_state, safety_qos
         )
 
+        # 2026-07-11 (HMI 재구축 Phase 5): HMI 대시보드용 조작 태스크 진행 상태.
+        # /hmi/task_status/world_map(world_map_node가 발행)과 별개 토픽 -
+        # hmi_ros_bridge가 두 토픽을 구독 소스 기준으로 태깅해서 하나의
+        # Socket.IO task_status 이벤트로 통합한다(motion_node는 발행하지
+        # 않음 - Action feedback은 _on_feedback을 통해 이미 brain_node가
+        # 소비하는 보조 정보일 뿐, 정본은 여기서 발행하는 이 상태다).
+        # safety_qos와 동일하게 TRANSIENT_LOCAL - 늦게 붙는 hmi_ros_bridge도
+        # 마지막 상태를 바로 받게 한다.
+        self.task_status_pub = self.create_publisher(
+            String, "hmi/task_status/manipulation", safety_qos
+        )
+
         # motion_node Action clients
         self.moveto_client = ActionClient(self, MoveTo, "motion/move_to")
         self.pick_client = ActionClient(self, Pick, "motion/pick")
@@ -138,6 +152,26 @@ class BrainNode(Node):
     def _say(self, text):
         """로봇 음성 응답을 요청한다(fire-and-forget). get_keyword_node가 재생한다."""
         self.tts_pub.publish(String(data=text))
+
+    def _publish_task_status(
+        self, task_id, status, step_index=None, step_total=None,
+        title="", detail="", phase="",
+    ):
+        """hmi/task_status/manipulation으로 task_status.schema.json 형태 JSON을
+        발행한다. status는 IDLE/WAITING/RUNNING/COMPLETED/FAILED만 쓴다(Safety
+        RUN/PAUSE/ESTOP과 절대 섞지 않는다 - 별도 모델)."""
+        self.task_status_pub.publish(String(data=json.dumps({
+            "task_id": task_id,
+            "mode": "pick_place",
+            "phase": phase,
+            "title": title,
+            "detail": detail,
+            "step_index": step_index,
+            "step_total": step_total,
+            "progress": (step_index / step_total) if step_total else None,
+            "status": status,
+            "timestamp": time.time(),
+        })))
 
     def robot_init(self):
         self.get_logger().info("Initializing robot: home 이동")
@@ -208,7 +242,19 @@ class BrainNode(Node):
         self._reset_safety()
         self._say("명령을 확인했습니다")
 
-        for obj, source, target in zip(objects, sources, targets):
+        # 2026-07-11 (HMI 재구축 Phase 5): task_id는 voice 명령 1회 실행(여러
+        # 물체를 순차 처리할 수 있음) 단위로 여기서 새로 발급한다 - Action goal
+        # UUID를 재사용하지 않는 이유는 하나의 명령이 Pick/Place/MoveTo 여러
+        # 개로 이루어져 goal이 여러 개 생기기 때문에, "이 명령 전체"를 가리키는
+        # 상위 식별자가 필요해서다.
+        task_id = str(uuid.uuid4())
+        step_total = len(objects)
+        self._publish_task_status(
+            task_id, "RUNNING", step_index=0, step_total=step_total,
+            title=f"{step_total}개 물체 처리", phase="starting",
+        )
+
+        for step_index, (obj, source, target) in enumerate(zip(objects, sources, targets)):
             scan_pose = POSITION_COORDS.get(source)
             target_pose = POSITION_COORDS.get(target)
             if scan_pose is None:
@@ -217,6 +263,11 @@ class BrainNode(Node):
             if target_pose is None:
                 self.get_logger().warn(f"'{target}' 좌표가 아직 채워지지 않음")
                 continue
+
+            self._publish_task_status(
+                task_id, "RUNNING", step_index=step_index, step_total=step_total,
+                title=f"'{obj}'를 '{target}'로 이동", phase="picking",
+            )
 
             # source(예: "scan")의 짝(예: "scan_b")이 POSITION_COORDS에 있으면 그 사이를
             # 스윕하며 탐색한다(2026-07-09). 없으면 scan_pose 한 지점만 보는 기존 동작.
@@ -232,11 +283,19 @@ class BrainNode(Node):
                     # 그것도 바로 emergency stop으로 실패하므로).
                     self.get_logger().warn("안전 정지 상태 감지 — 남은 물체 처리 중단, RESUME 대기")
                     self._say("정지했습니다")
+                    self._publish_task_status(
+                        task_id, "FAILED", step_index=step_index, step_total=step_total,
+                        title=f"'{obj}' 처리 중 안전 정지", detail=reason, phase="estopped",
+                    )
                     return
                 self._say("물체를 잡지 못해 건너뜁니다")
                 continue
 
             self._say("잡았습니다")
+            self._publish_task_status(
+                task_id, "RUNNING", step_index=step_index, step_total=step_total,
+                title=f"'{obj}'를 '{target}'로 이동", phase="placing",
+            )
 
             place_res = self._send_place(target_pose)
             if place_res is None or not place_res.success:
@@ -245,6 +304,10 @@ class BrainNode(Node):
                 if self._safety_state != SafetyState.RUN:
                     self.get_logger().warn("안전 정지 상태 감지 — 남은 물체 처리 중단, RESUME 대기")
                     self._say("정지했습니다")
+                    self._publish_task_status(
+                        task_id, "FAILED", step_index=step_index, step_total=step_total,
+                        title=f"'{obj}' 처리 중 안전 정지", detail=reason, phase="estopped",
+                    )
                     return
             else:
                 self._say("놓았습니다")
@@ -261,8 +324,16 @@ class BrainNode(Node):
                 self._say("정지했습니다")
             else:
                 self._say("복귀에 실패했습니다")
+            self._publish_task_status(
+                task_id, "FAILED", step_index=step_total, step_total=step_total,
+                title="home 복귀 실패", detail=reason, phase="returning_home",
+            )
             return
         self._say("작업을 완료했습니다")
+        self._publish_task_status(
+            task_id, "COMPLETED", step_index=step_total, step_total=step_total,
+            title=f"{step_total}개 물체 처리 완료", phase="done",
+        )
 
     # ---- Action / service 헬퍼 ----
     def _reset_safety(self):

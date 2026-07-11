@@ -8,10 +8,13 @@
 #
 # 콜백은 절대 emit_channel 밖으로 직접 소켓 I/O를 하지 않는다 - publish_state/
 # publish_event로 큐에 넣기만 하고 바로 리턴한다(emit_channel.py 주석 참고).
+import json
 import time
 
 from rcl_interfaces.msg import Log
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from robot_interfaces.msg import SafetyState
 from std_msgs.msg import Float32, String
 from std_srvs.srv import SetBool
 
@@ -21,6 +24,26 @@ VOICE_MANUAL_RECORD_SERVICE = "/voice/manual_record"
 ROSOUT_TOPIC = "/rosout"
 LOG_SOURCE_NODE = "get_keyword_node"
 _LOG_LEVEL_NAMES = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "FATAL"}
+
+# safety_monitor_node가 이미 발행 중인 토픽 그대로 구독한다 - 그쪽은 무수정.
+SAFETY_STATE_TOPIC = "/safety/state"
+_SAFETY_STATE_NAMES = {SafetyState.RUN: "RUN", SafetyState.PAUSE: "PAUSE", SafetyState.ESTOP: "ESTOP"}
+
+# brain_node/world_map_node가 발행하는 두 토픽 - 같은 스키마를 쓰되 절대 하나로
+# 합쳐 발행하지 않는다(합의된 설계: 발행자가 다르면 TRANSIENT_LOCAL latch가
+# 서로를 덮어써서 "누가 마지막으로 발행했는지"로 헷갈릴 수 있음). 이 Bridge가
+# 구독 토픽 기준으로 source를 강제 태깅해서 하나의 Socket.IO 이벤트로 통합한다.
+TASK_STATUS_TOPICS = {
+    "hmi/task_status/manipulation": "manipulation",
+    "hmi/task_status/world_map": "world_map",
+}
+
+# TRANSIENT_LOCAL 발행자(safety_monitor_node, brain_node, world_map_node)와
+# 매칭되는 구독 QoS - 늦게 뜬 이 브릿지도 마지막 상태를 바로 받는다.
+_LATCHED_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST, depth=1,
+    reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 # command_id 중복 방지 (Bridge 쪽 방어 계층 - Flask 쪽에도 별도로 있다).
 COMMAND_DEDUP_TTL_SEC = 60.0
@@ -45,15 +68,25 @@ class BridgeNode(Node):
         self.create_subscription(Log, ROSOUT_TOPIC, self._on_rosout, 50)
         self._manual_record_client = self.create_client(SetBool, VOICE_MANUAL_RECORD_SERVICE)
 
-        self.get_logger().info("hmi_ros_bridge 시작 - voice 구독/서비스 준비 완료")
+        self.create_subscription(SafetyState, SAFETY_STATE_TOPIC, self._on_safety_state, _LATCHED_QOS)
+        for topic, source in TASK_STATUS_TOPICS.items():
+            self.create_subscription(
+                String, topic,
+                lambda msg, source=source: self._on_task_status(msg, source),
+                _LATCHED_QOS,
+            )
+
+        self.get_logger().info("hmi_ros_bridge 시작 - voice/safety/task_status 구독, 서비스 준비 완료")
 
     def _on_voice_state(self, msg):
         self._state = msg.data
-        self._emit.publish_state("voice_status", {"state": self._state, "level": self._level})
+        payload = {"state": self._state, "level": self._level}
+        self._emit.publish_state("voice_status", "voice_status", payload)
 
     def _on_voice_level(self, msg):
         self._level = round(float(msg.data), 4)
-        self._emit.publish_state("voice_status", {"state": self._state, "level": self._level})
+        payload = {"state": self._state, "level": self._level}
+        self._emit.publish_state("voice_status", "voice_status", payload)
 
     def _on_rosout(self, msg):
         if msg.name != LOG_SOURCE_NODE:
@@ -61,6 +94,32 @@ class BridgeNode(Node):
         stamp = msg.stamp.sec + msg.stamp.nanosec / 1e9
         level_name = _LOG_LEVEL_NAMES.get(_log_level_to_int(msg.level), "INFO")
         self._emit.publish_event("voice_log", {"level": level_name, "text": msg.msg, "stamp": stamp})
+
+    def _on_safety_state(self, msg):
+        """/safety/state(safety_monitor_node, 무수정)를 safety_status.schema.json
+        형태로 옮긴다 - Task 상태와 절대 같은 모델로 섞지 않는다(별도 latest-value 슬롯)."""
+        payload = {
+            "state": _SAFETY_STATE_NAMES.get(msg.state, "UNKNOWN"),
+            "reason": msg.reason,
+            "timestamp": time.time(),
+        }
+        self._emit.publish_state("safety_status", "safety_status", payload)
+
+    def _on_task_status(self, msg, source):
+        """hmi/task_status/manipulation, hmi/task_status/world_map 둘 다 여기로
+        들어온다. source는 구독 토픽 기준으로 이 Bridge가 강제 태깅한다(발행
+        노드의 status.mode 값과 무관하게 항상 정확함) - task_status_event.schema.json
+        형태({source, status})로 만들어 Socket.IO에는 항상 event_name="task_status"
+        하나로 나가되(Flask 쪽 핸들러가 그 이름 하나만 구독), 슬롯 키는
+        "task_status:<source>"로 분리해 두 소스가 서로의 latest-value를 밀어내지
+        않게 한다(emit_channel.py의 slot_key/event_name 분리 참고)."""
+        try:
+            status = json.loads(msg.data)
+        except (ValueError, TypeError):
+            self.get_logger().warn(f"{source} task_status JSON 파싱 실패, 무시: {msg.data!r}")
+            return
+        payload = {"source": source, "status": status}
+        self._emit.publish_state(f"task_status:{source}", "task_status", payload)
 
     def _sweep_seen_commands(self, now):
         expired = [cid for cid, (expire_at, _ack) in self._seen_commands.items() if expire_at < now]
