@@ -61,6 +61,12 @@ class RosNamespace(Namespace):
         # voice_log와 같은 한계, 허용 가능한 트레이드오프).
         self._relay("rl_reach_progress", data)
 
+    def on_grasp_angle_delta(self, data):
+        # pick() attempt마다의 그립 각도 정렬 오차 - "최신값"만 의미 있는 상태라
+        # safety_status/voice_status와 동일하게 캐싱한다(새로 붙은 탭도 마지막 값을
+        # 바로 재생받음).
+        self._relay("grasp_angle_delta", data, cache_key="grasp_angle_delta")
+
     def on_safety_status(self, data):
         try:
             validate("safety_status.schema.json", data)

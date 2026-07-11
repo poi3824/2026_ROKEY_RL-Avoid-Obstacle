@@ -44,6 +44,12 @@ TASK_STATUS_TOPICS = {
 # emit_channel.py 모듈 docstring의 "이벤트" 분류 참고).
 RL_STEP_TOPIC = "hmi/rl_reach_progress"
 
+# 2026-07-12: motion_executor.pick()이 attempt마다 발행 - HMI Performance 탭의 그립
+# 각도 게이지용. rl_reach_progress와 반대로 "최신값"만 의미 있는 데이터라
+# publish_state로 중계한다(중간값 드롭 가능, 새로 붙은 탭도 마지막 값을 바로 재생받음 -
+# voice_status/safety_status와 동일한 이유).
+GRASP_DELTA_TOPIC = "hmi/grasp_angle_delta"
+
 # TRANSIENT_LOCAL 발행자(safety_monitor_node, brain_node, world_map_node)와
 # 매칭되는 구독 QoS - 늦게 뜬 이 브릿지도 마지막 상태를 바로 받는다.
 _LATCHED_QOS = QoSProfile(
@@ -82,8 +88,11 @@ class BridgeNode(Node):
                 _LATCHED_QOS,
             )
         self.create_subscription(String, RL_STEP_TOPIC, self._on_rl_step, 10)
+        self.create_subscription(String, GRASP_DELTA_TOPIC, self._on_grasp_delta, 10)
 
-        self.get_logger().info("hmi_ros_bridge 시작 - voice/safety/task_status/rl_reach_progress 구독, 서비스 준비 완료")
+        self.get_logger().info(
+            "hmi_ros_bridge 시작 - voice/safety/task_status/rl_reach_progress/grasp_angle_delta 구독, 서비스 준비 완료"
+        )
 
     def _on_voice_state(self, msg):
         self._state = msg.data
@@ -135,6 +144,14 @@ class BridgeNode(Node):
             self.get_logger().warn(f"rl_reach_progress JSON 파싱 실패, 무시: {msg.data!r}")
             return
         self._emit.publish_event("rl_reach_progress", payload)
+
+    def _on_grasp_delta(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except (ValueError, TypeError):
+            self.get_logger().warn(f"grasp_angle_delta JSON 파싱 실패, 무시: {msg.data!r}")
+            return
+        self._emit.publish_state("grasp_angle_delta", "grasp_angle_delta", payload)
 
     def _sweep_seen_commands(self, now):
         expired = [cid for cid, (expire_at, _ack) in self._seen_commands.items() if expire_at < now]

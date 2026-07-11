@@ -88,7 +88,7 @@ class MotionExecutor:
         get_surface_z=None, redetect=None, grip_min_width=None, logger=None,
         check_motion=None, estop_event=None, hand_pause_event=None,
         dsr_lock=None, amovej=None, get_current_posj=None, get_current_posx=None,
-        cancel_event=None, get_grasp_delta=None, on_rl_step=None,
+        cancel_event=None, get_grasp_delta=None, on_rl_step=None, on_grasp_logged=None,
     ):
         self._movel = movel  # amovel을 주입받는다 (위 모듈 주석 참고)
         self._movej = movej
@@ -113,6 +113,10 @@ class MotionExecutor:
         self.grip_min_width = grip_min_width if grip_min_width is not None else DEFAULT_GRIP_MIN_WIDTH
         self.logger = logger  # pick_logger.PickLogger를 주입받음 (없으면 기록 생략)
         self.get_grasp_delta = get_grasp_delta  # motion_node.get_last_grasp_delta를 주입받음 (없으면 None 기록)
+        # 2026-07-12: log_attempt() 직후 호출 - HMI Performance 탭의 그립 각도 게이지가
+        # 기존 5초 DB 폴링 대신 이걸로 즉시 갱신되도록(hmi/grasp_angle_delta, on_rl_step과
+        # 동일하게 motion_node가 발행). 없으면 호출 생략 - DB 로깅 자체는 그대로 유지.
+        self.on_grasp_logged = on_grasp_logged
         # 2026-07-12: move_via_rl()이 매 스텝 호출 - motion_node가 hmi/rl_reach_progress로
         # 발행하도록 주입받음(없으면 print()만 하고 넘어감, 기존 동작 그대로).
         self.on_rl_step = on_rl_step
@@ -414,6 +418,8 @@ class MotionExecutor:
                     obj_label, attempt + 1, surface_z, width, grip_detected, motion_done, success,
                     grasp_delta_deg,
                 )
+                if self.on_grasp_logged:
+                    self.on_grasp_logged(grasp_delta_deg)
 
             if success:
                 # 파지 성공 후 PICK_RETRACT_Z로 후퇴. 여기서 다음 move_linear(place

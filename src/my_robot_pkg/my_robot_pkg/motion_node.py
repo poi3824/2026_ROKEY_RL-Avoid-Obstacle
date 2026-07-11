@@ -166,6 +166,11 @@ class MotionNode(Node):
         # 매 스텝 _publish_rl_step으로 호출한다(hmi/vision_detections와 동일하게
         # JSON을 실은 String, hmi_ros_bridge/bridge_node.py가 구독해 Socket.IO로 중계).
         self.rl_step_pub = self.create_publisher(String, "hmi/rl_reach_progress", 10)
+        # 2026-07-12: HMI Performance 탭의 그립 각도 게이지용 - pick() attempt마다
+        # log_attempt() 직후 발행(5초 DB 폴링 대신 즉시 갱신). "최신값"만 의미 있는
+        # 데이터라 bridge_node.py가 publish_state(상태 슬롯)로 중계한다(rl_reach_progress와
+        # 달리 매 값을 다 보존할 필요 없음 - 최신 탭 연결 시 재생도 공짜로 됨).
+        self.grasp_delta_pub = self.create_publisher(String, "hmi/grasp_angle_delta", 10)
 
         # Action 서버의 goal/result/cancel 서비스가 blocking execute 콜백과 "동시에"
         # 처리돼야 클라이언트(brain)가 결과를 받는다. MutuallyExclusive로 묶으면
@@ -223,6 +228,7 @@ class MotionNode(Node):
             cancel_event=cancel_event,
             get_grasp_delta=self.get_last_grasp_delta,
             on_rl_step=self._publish_rl_step,
+            on_grasp_logged=self._publish_grasp_delta,
         )
 
         # Action servers
@@ -539,6 +545,13 @@ class MotionNode(Node):
     def _publish_rl_step(self, payload):
         """MotionExecutor.move_via_rl()이 매 스텝 호출하는 on_rl_step 콜백."""
         self.rl_step_pub.publish(String(data=json.dumps(payload)))
+
+    def _publish_grasp_delta(self, angle_delta_deg):
+        """MotionExecutor.pick()이 log_attempt() 직후 호출하는 on_grasp_logged 콜백."""
+        self.grasp_delta_pub.publish(String(data=json.dumps({
+            "angle_delta_deg": angle_delta_deg,
+            "timestamp": time.time(),
+        })))
 
     def get_target_pos(self, label):
         """realsense로 label의 depth를 찍어 베이스 좌표 + grasp orientation을 반환한다."""
