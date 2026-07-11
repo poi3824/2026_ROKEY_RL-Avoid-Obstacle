@@ -89,7 +89,7 @@ src/hmi_ros_bridge/test/test_bridge_node.py -p no:anyio` (실제 rclpy 그래프
 저장된 스캔을 직접 렌더링한다(기존 hmi_bridge의 iframe 뷰어를 대체, 그쪽은
 계속 무수정 병행 운영).
 
-## 전체 실행 순서 (로봇 실기 기준, 터미널 6개)
+## 전체 실행 순서 (로봇 실기 기준, 터미널 7개)
 
 ```bash
 # 1) 로봇 드라이버 (직접)
@@ -97,6 +97,12 @@ ros2 launch dsr_bringup2 dsr_bringup2_rviz.launch.py mode:=real host:=<로봇IP>
 
 # 2) RealSense 카메라 (직접)
 ros2 launch realsense2_camera rs_align_depth_launch.py ...
+
+# 2.5) 카메라-로봇 캘리브레이션 TF (직접, alias: camera_attach) - 빠뜨리기 쉬움 주의!
+#      link_6 -> camera_link 정적 TF. 이게 없으면 world_map_node가 point cloud를
+#      base_link 기준으로 변환하지 못해 스캔이 실패한다(TF 트리가 로봇 쪽과
+#      카메라 쪽으로 분리됨). 2026-07-11에 실제로 이걸 빼먹고 실행해서 겪은 문제.
+ros2 run tf2_ros static_transform_publisher --x 0.00 --y 0.05 --z 0.03 --roll -1.5708 --pitch -1.5708 --yaw 0.0 --frame-id link_6 --child-frame-id camera_link
 
 # 3) pick-and-place 애플리케이션 노드 전부 (기존 my_robot_pkg, 무수정)
 ros2 launch my_robot_pkg pnp_bringup.launch.py
@@ -110,9 +116,69 @@ cd hmi/backend && unset PYTHONPATH && .venv/bin/python run.py
 # 6) hmi/frontend
 cd hmi/frontend && npm run dev
 ```
-1)/2)가 먼저 떠 있어야 3)의 pick/place 동작이 실제로 성공한다(3)/4)는 순서 상관없이
-서로 기다리며 재시도한다). 5)/6)은 ROS 노드가 아니라서 launch에 안 넣었다(venv/npm
-활성화 필요, 로그/재시작 관리가 launch보다 직접 터미널이 편함).
+1)/2)/2.5)가 먼저 떠 있어야 3)의 pick/place와 월드맵 스캔이 실제로 성공한다(3)/4)는
+순서 상관없이 서로 기다리며 재시도한다). 5)/6)은 ROS 노드가 아니라서 launch에 안
+넣었다(venv/npm 활성화 필요, 로그/재시작 관리가 launch보다 직접 터미널이 편함).
+
+**실행 전에 아래 "로컬 머신 사전 설정"이 이미 적용돼 있어야 한다** - 안 그러면 노드
+수가 많은 이 전체 구성에서 point cloud가 유실되거나 노드가 아예 안 뜬다.
+
+## 로컬 머신 사전 설정 (git 대상 아님, 이 노트북에 1회성으로 적용됨)
+
+2026-07-11: 로봇드라이버+카메라만 켜고 `ros2 service call /update_world_map ...`을
+직접 호출하면 스캔이 잘 되는데, 위 6~7단계 전체 구성(pnp_bringup + hmi 전부)으로
+실행하면 `world_map_node`가 point cloud를 아예 못 받아 스캔이 실패하는 문제가 있었다.
+`~/.bashrc`와 커널 sysctl 설정 문제로 확인/수정 완료 - **git으로 추적되지 않는
+시스템 설정**이라 이 노트북이 초기화되거나 새 개발 머신으로 옮기면 다시 적용해야 한다.
+
+원인 1) `CYCLONEDDS_URI`가 루프백이 아니라 WiFi 인터페이스(`wlp4s0`)로 고정돼 있어서,
+같은 기계 안에서만 오가는 ROS2 트래픽(카메라 -> world_map_node 등)까지 WiFi 스택을
+거치며 point cloud처럼 큰 메시지의 패킷이 유실됨.
+
+원인 2) 루프백(`lo`)은 멀티캐스트를 지원하지 않아(`ip link show lo`에 `MULTICAST`
+플래그 없음) CycloneDDS가 멀티캐스트 없이 고정 포트 슬롯(기본 0~9, 10개)만 스캔하는
+폴백 모드로 들어가는데, pnp_bringup(7개) + hmi_ros_bridge(2개) + 로봇드라이버 내부
+노드들을 다 합치면 13개+가 되어 슬롯이 고갈되고 `Failed to find a free participant
+index for domain 90` 에러로 일부 노드가 아예 못 뜸.
+
+`~/.bashrc`에 적용된 최종 설정 (`ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION` 아래):
+```bash
+export CYCLONEDDS_URI='<CycloneDDS>
+  <Domain>
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo"/>
+      </Interfaces>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>200</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>'
+```
+(다른 PC에서 이 ROS2 그래프를 봐야 하는 상황이 생기면 `name="lo"`를 원래 값인
+`name="wlp4s0"`로 되돌리면 되는데, 그러면 원인 1)이 재발하니 대신 `lo`/`wlp4s0`
+둘 다 리스트에 넣는 걸 먼저 검토할 것.)
+
+추가로 커널 UDP 소켓 버퍼도 기본값(208KB)이 point cloud 같은 대용량 메시지엔 작아서
+`/etc/sysctl.d/60-cyclonedds.conf`로 확장:
+```
+net.core.rmem_max=2147483647
+net.core.rmem_default=2147483647
+net.core.wmem_max=2147483647
+net.core.wmem_default=2147483647
+```
+새 머신에서 처음 설정할 때: 위 두 블록을 각각 `~/.bashrc`와 `/etc/sysctl.d/60-cyclonedds.conf`에
+넣고 `sudo sysctl --system`으로 즉시 적용. `.bashrc`는 새 터미널을 열어야 반영된다
+(이미 떠 있는 터미널에는 적용 안 됨 - 전체 스택을 새 터미널들로 재시작해야 함).
+
+**증상으로 다시 이 문제인지 확인하는 법**: `world_map_node` 로그에 `settle 동안 point
+cloud를 아직 한 번도 받지 못함` / `last_seen_stamp=None`이 뜨는데 `ros2 topic hz
+/camera/camera/depth/color/points`로는 정상 30Hz가 나온다면(퍼블리셔는 살아있는데
+구독자만 못 받는 상황), 십중팔구 이 문제다. `ros2 node list`에 같은 이름 노드가
+중복으로 뜨는 건 대부분 `ros2 daemon` 캐시 오염이라 무관하니 `ros2 daemon stop &&
+ros2 daemon start`로만 정리하면 된다.
 
 ## 프로덕션 실행 구조 (아직 미확정, 후속 작업)
 
