@@ -583,6 +583,24 @@ RESUME / RESUME / RESUME / RESUME
                     self._speak_locally("손 아닌 걸로 하겠습니다")
                     break
 
+                if "WORLD_MAP" in obj:
+                    # 2026-07-11 버그 수정: WORLD_MAP은 물체/위치가 아니라 특수 값이라
+                    # _first_valid()가 의도적으로 제외한다(다른 슬롯과 섞였을 때 실제
+                    # 물체/위치로 오인되지 않게 하기 위함) - 근데 STOP/RESUME/IGNORE_HAND와
+                    # 달리 이 명령만 슬롯필링을 건너뛰는 사전 분기가 없어서, 순수 월드맵
+                    # 명령("월드맵 스캔해줘")도 아래 슬롯필링(_update_slots_and_build_command)을
+                    # 그대로 타면 네 슬롯이 전부 None으로 걸러져 "정보 부족"으로 오되묻는
+                    # 문제가 있었다(실기 확인: STT 인식은 정상인데 "어떤 물체를 옮길까요?"로
+                    # 되물음). STOP/RESUME/IGNORE_HAND와 동일하게 여기서 먼저 걸러낸다.
+                    self.get_logger().warn(f"월드맵 명령 감지(LLM): STT='{output_message}'")
+                    completed_command = "WORLD_MAP / WORLD_MAP / WORLD_MAP / WORLD_MAP"
+                    self.voice_logger.log_event("command", completed_command)
+                    self._clear_pending_slots()
+                    with self._lock:
+                        self._latest_command = completed_command
+                    self._command_ready.set()
+                    break
+
                 # 2026-07-10: 슬롯필링 — 물체가 하나뿐인 명령(obj/source/target/return_pos
                 # 각 리스트가 길이 1 이하)만 대상으로 한다. 여러 물체를 한 번에 말하는
                 # 기존 패턴("빨간색 통은 1번으로, 파란색 통은 2번으로")은 _first_valid()가
