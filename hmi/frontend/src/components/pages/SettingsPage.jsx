@@ -1,3 +1,5 @@
+import SystemInfo from "../panels/SystemInfo";
+
 export default function SettingsPage() {
   return (
     <div>
@@ -6,6 +8,7 @@ export default function SettingsPage() {
         필요하다. 로봇 제어 관련 값은 motion_node.py에 하드코딩된 값을 그대로 보여준다
         (수정 기능 없음, Phase 3 이후 검토).
       </div>
+      <SystemInfo />
       <div className="card" style={{ maxWidth: 480 }}>
         <table className="hmi-table">
           <tbody>

@@ -30,11 +30,12 @@ def fetch_recent_attempts(limit=MAX_ROWS, db_path=DEFAULT_DB_PATH):
 
     conn = _connect(db_path)
     try:
+        # SELECT * - 명시적 컬럼 목록을 쓰면 쓰기 쪽(pick_logger.py)이 마이그레이션으로
+        # 새 컬럼(angle_delta_deg 등)을 추가하기 전까지 이 읽기 전용 연결이 "no such
+        # column" 에러를 낸다(mode=ro라 여기서 ALTER TABLE을 대신 실행할 수도 없다).
+        # *로 두면 쓰기 쪽 스키마가 몇 버전이든 그대로 따라간다.
         rows = conn.execute(
-            "SELECT id, ts, obj_label, attempt_no, surface_z_mm, gripper_width_mm, "
-            "grip_detected, motion_done, success "
-            "FROM pick_attempts ORDER BY id DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM pick_attempts ORDER BY id DESC LIMIT ?", (limit,),
         ).fetchall()
     finally:
         conn.close()

@@ -84,10 +84,13 @@ def compute_grasp_c(current_c, angle_deg):
     """마스크 짧은 변의 이미지 각도(angle_deg)로부터 새 wrist yaw(C)를 계산한다.
 
     그리퍼가 대칭(핑거 2개)이라 delta를 [-90, 90)로 정규화해 항상 최소 회전만 적용.
+    delta도 같이 반환한다 - 0에 가까울수록 그리퍼 축이 물체의 짧은 변에 정렬됐다는
+    뜻이라, HMI Performance 탭의 그립 각도 정렬 게이지가 그대로 쓴다(get_target_pos
+    참고).
     """
     delta = GRASP_ANGLE_SIGN * (angle_deg - GRASP_AXIS_IMG_ANGLE_DEG)
     delta = ((delta + 90.0) % 180.0) - 90.0
-    return current_c + delta
+    return current_c + delta, delta
 
 
 # ---- DSR / dsr_node 부트스트랩 (robot_action_node와 동일 패턴) ----
@@ -156,6 +159,7 @@ class MotionNode(Node):
         self.gripper2cam = np.load(gripper2cam_path)
 
         self.pick_logger = PickLogger()
+        self.last_grasp_delta_deg = None  # get_target_pos()가 채움, get_last_grasp_delta()로 노출
 
         # Action 서버의 goal/result/cancel 서비스가 blocking execute 콜백과 "동시에"
         # 처리돼야 클라이언트(brain)가 결과를 받는다. MutuallyExclusive로 묶으면
@@ -211,6 +215,7 @@ class MotionNode(Node):
             amovej=amovej, get_current_posj=get_current_posj,
             get_current_posx=lambda: get_current_posx(ref=DR_BASE),
             cancel_event=cancel_event,
+            get_grasp_delta=self.get_last_grasp_delta,
         )
 
         # Action servers
@@ -520,6 +525,10 @@ class MotionNode(Node):
         result = future.result()
         return bool(result is not None and result.visible)
 
+    def get_last_grasp_delta(self):
+        """MotionExecutor.pick()이 log_attempt()에 실어보낼 최근 grasp 정렬 delta(deg)."""
+        return self.last_grasp_delta_deg
+
     def get_target_pos(self, label):
         """realsense로 label의 depth를 찍어 베이스 좌표 + grasp orientation을 반환한다."""
         self.get_position_request.target = label
@@ -547,7 +556,12 @@ class MotionNode(Node):
             base_coords[2] += DEPTH_OFFSET
             base_coords[2] = max(base_coords[2], MIN_DEPTH)
 
-        grasp_c = compute_grasp_c(robot_posx[5], result.angle_deg)
+        grasp_c, grasp_delta_deg = compute_grasp_c(robot_posx[5], result.angle_deg)
+        # pick()이 이 attempt를 로깅할 때 같이 넣도록 저장해둔다(get_last_grasp_delta
+        # 콜백으로 MotionExecutor에 주입됨) - get_target_pos는 pick() 루프 밖에서도
+        # (초기 탐지) redetect로 재시도 중에도 호출되므로, log_attempt 시점엔 항상
+        # 그 attempt에 실제 쓰인 값이 최신으로 남아있다.
+        self.last_grasp_delta_deg = grasp_delta_deg
         orientation = list(robot_posx[3:5]) + [grasp_c]
         return list(base_coords[:3]) + orientation
 

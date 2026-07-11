@@ -1,7 +1,8 @@
 import { useState } from "react";
 import AppShell from "./components/layout/AppShell";
-import SafetyStatus from "./components/panels/SafetyStatus";
+import NodeStatus from "./components/panels/NodeStatus";
 import TaskProgress from "./components/panels/TaskProgress";
+import KpiStrip from "./components/panels/KpiStrip";
 import VoiceConsole from "./components/panels/VoiceConsole";
 import VisionPanel from "./components/panels/VisionPanel";
 import RobotViewer from "./components/panels/RobotViewer";
@@ -20,10 +21,10 @@ import { useTaskStatus } from "./hooks/useTaskStatus";
 // Socket.IO(hmi_ros_bridge -> hmi/backend -> 브라우저)에 연결됨.
 // Phase 4: VisionPanel은 useVisionStream()으로 hmi_vision_stream(MJPEG, 8767)에
 // 연결 - 자체 YOLO 로드 없이 object_detection_node의 hmi/vision_detections를 재사용.
-// Phase 5: SafetyStatus/TaskProgress는 useSafetyStatus()/useTaskStatus()로 실제
-// /safety/state, hmi/task_status/{manipulation,world_map}에 연결됨 - 두 모델을
-// 절대 섞지 않는다(합의된 원칙). 기존 hmi_interface(:5050)/hmi_bridge(:5000)는
-// 계속 병행 운영 중.
+// Phase 5: TaskProgress는 useSafetyStatus()/useTaskStatus()로 실제 /safety/state,
+// hmi/task_status/{manipulation,world_map}에 연결됨 - 두 모델을 절대 섞지 않는다
+// (safety는 TaskProgress 헤더에 배지로만 같이 보여줄 뿐, 데이터는 분리 유지).
+// 기존 hmi_interface(:5050)/hmi_bridge(:5000)는 계속 병행 운영 중.
 export default function App() {
   const [activeId, setActiveId] = useState("dashboard");
   const [selectedScanId, setSelectedScanId] = useState(null);
@@ -35,15 +36,18 @@ export default function App() {
   const taskStatus = useTaskStatus();
 
   return (
-    <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={bridgeConnected}>
+    <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={bridgeConnected} safety={safetyStatus}>
       {activeId === "dashboard" && (
         <div>
-          <SafetyStatus status={safetyStatus} />
-          <TaskProgress tasks={taskStatus} />
-          <div className="split-row">
-            <VisionPanel vision={vision} />
-            <RobotViewer />
+          <NodeStatus />
+          <div className="card">
+            <div className="split-row" style={{ marginBottom: 0 }}>
+              <VisionPanel vision={vision} bare />
+              <RobotViewer bare />
+            </div>
           </div>
+          <TaskProgress tasks={taskStatus} safety={safetyStatus} />
+          <KpiStrip summary={db.summary} error={db.error} />
         </div>
       )}
 
@@ -67,7 +71,7 @@ export default function App() {
         </div>
       )}
 
-      {activeId === "performance" && <PerformancePage summary={db.summary} />}
+      {activeId === "performance" && <PerformancePage summary={db.summary} pickAttempts={db.pickAttempts} />}
 
       {activeId === "settings" && <SettingsPage />}
     </AppShell>
