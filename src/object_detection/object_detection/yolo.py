@@ -149,6 +149,12 @@ class YoloModel:
         순수 추가다. 추가 추론 호출이 생기는 게 아니라 detection.py 쪽에서
         기존 추론 1회 호출 결과를 이 메서드로 감싸 재사용하는 방식이라
         자원 사용량이 늘지 않는다.
+
+        2026-07-12: seg 모델이면 각 감지의 마스크 폴리곤(mask)도 같이 담는다 -
+        HMI 카메라 스트림에 bbox뿐 아니라 segmentation 오버레이도 그릴 수
+        있도록. res.masks.xy는 res.boxes와 같은 순서/개수로 정렬되어 있어
+        인덱스로 그대로 매칭한다(_find_matching_mask_info의 IoU 매칭과 달리
+        여기선 같은 추론 결과 안이라 위치 매칭이 필요 없다).
         """
         if frame is None:
             return []
@@ -160,16 +166,20 @@ class YoloModel:
             boxes = res.boxes
             if boxes is None:
                 continue
-            for box, score, label in zip(
+            masks_xy = res.masks.xy if res.masks is not None else None
+            for i, (box, score, label) in enumerate(zip(
                 boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist()
-            ):
+            )):
                 if score < confidence_threshold:
                     continue
-                detections.append({
+                det = {
                     "label": names.get(int(label), str(int(label))),
                     "score": round(float(score), 4),
                     "box": [round(float(v), 1) for v in box],
-                })
+                }
+                if masks_xy is not None and i < len(masks_xy):
+                    det["mask"] = [[round(float(x), 1), round(float(y), 1)] for x, y in masks_xy[i]]
+                detections.append(det)
         return detections
 
     def get_best_detection(self, img_node, target):

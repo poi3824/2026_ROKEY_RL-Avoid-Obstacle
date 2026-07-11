@@ -103,10 +103,24 @@ class VisionStreamNode(Node):
         if time.time() - stamp > DETECTIONS_STALE_SEC:
             return frame  # 감지 결과가 너무 오래됨(object_detection_node 안 떠 있는 듯) - 원본만 표시
 
-        annotated = frame.copy()
-        for det in detections:
-            if det.get("score", 0) < OVERLAY_CONFIDENCE_THRESHOLD:
-                continue
+        visible = [d for d in detections if d.get("score", 0) >= OVERLAY_CONFIDENCE_THRESHOLD]
+
+        # 2026-07-12: object_detection_node가 이제 hmi/vision_detections에 mask
+        # 폴리곤도 실어 보내므로(yolo.py detect_frame 참고), 여기서 fillPoly로
+        # 채워 그린다. 마스크가 있는 감지만 별도 레이어에 그려서 한 번에
+        # addWeighted 하는 이유는, 감지마다 alpha 블렌딩을 반복하면 겹치는
+        # 영역이 여러 번 블렌딩되어 색이 진해지는 걸 피하기 위함이다.
+        mask_dets = [d for d in visible if d.get("mask") and len(d["mask"]) >= 3]
+        if mask_dets:
+            overlay = frame.copy()
+            for det in mask_dets:
+                pts = np.array(det["mask"], dtype=np.int32).reshape((-1, 1, 2))
+                cv2.fillPoly(overlay, [pts], _color_for(det.get("label", "?")))
+            annotated = cv2.addWeighted(overlay, MASK_FILL_ALPHA, frame, 1 - MASK_FILL_ALPHA, 0)
+        else:
+            annotated = frame.copy()
+
+        for det in visible:
             name = det.get("label", "?")
             color = _color_for(name)
             box = det.get("box")

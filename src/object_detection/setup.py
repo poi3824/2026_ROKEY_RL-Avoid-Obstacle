@@ -31,6 +31,7 @@ setup(
             'depth_probe = object_detection.depth_probe:main',
             'angle_probe = object_detection.angle_probe:main',
             'yolo_probe = object_detection.yolo_probe:main',
+            'webcam_camera_probe = object_detection.webcam_camera_probe:main',
         ],
     },
 )
