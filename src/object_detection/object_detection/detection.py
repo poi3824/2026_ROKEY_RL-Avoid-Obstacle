@@ -1,3 +1,5 @@
+import json
+import time
 from collections import deque
 
 import numpy as np
@@ -9,7 +11,7 @@ from typing import Any, Callable, Optional, Tuple
 
 from ament_index_python.packages import get_package_share_directory
 from od_msg.srv import SrvDepthPosition, SrvVisibilityCheck
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from object_detection.realsense import ImgNode
 from object_detection.yolo import YoloModel
 
@@ -30,6 +32,15 @@ DEPTH_ROI_HALF = 3  # (2*n+1)x(2*n+1) 정사각형 영역에서 median 계산
 # 추론 + 여유를 감안해 0.3초.
 HAND_CHECK_INTERVAL_SEC = 0.3
 HAND_LABEL = "hand"
+# YoloModel.has_label()의 기존 기본값(0.9)과 정확히 동일해야 한다 - hand_detected는
+# safety_monitor_node가 ESTOP/PAUSE 판단에 직접 쓰는 안전 신호라, 이 리팩토링으로
+# 판정 값이 단 하나도 달라지면 안 된다(아래 _extract_hand_detected 참고).
+HAND_CONFIDENCE_THRESHOLD = 0.9
+
+# 2026-07-11 (HMI 재구축 Phase 4): hmi/vision_detections에 publish할 때 쓰는
+# 하한선. hand 판정(HAND_CONFIDENCE_THRESHOLD)과는 별개 - 화면 표시용이라 더
+# 낮게 잡아도 되고, HMI 쪽(vision_bridge.py가 쓰던 0.6)에서 한 번 더 필터링한다.
+DETECTIONS_PUBLISH_CONFIDENCE_THRESHOLD = 0.5
 
 # 2026-07-08: threshold(0.6) 근처에서 confidence가 흔들려서(실측: 같은 손이
 # 0.35~0.96 사이를 왔다갔다) 단일 프레임 판정만으로는 감지->해제->감지가
@@ -38,6 +49,15 @@ HAND_LABEL = "hand"
 # 번의 단일 프레임 판정 이력을 다수결로 스무딩한다 — 체크 속도/자원 사용량은
 # 그대로면서 흔들림에는 강해진다.
 HAND_BUFFER_SIZE = 5
+
+
+def _extract_hand_detected(detections, threshold=HAND_CONFIDENCE_THRESHOLD):
+    """detect_frame()이 반환한 감지 목록에서 hand_detected 단일 프레임 판정을
+    뽑아낸다. YoloModel.has_label(frame, HAND_LABEL, confidence_threshold=0.9)와
+    의미상 동일해야 한다(라벨 일치 + score >= threshold인 감지가 하나라도
+    있으면 True) - 순수 함수라 실제 모델/카메라 없이도 단위 테스트 가능하다.
+    """
+    return any(d["label"] == HAND_LABEL and d["score"] >= threshold for d in detections)
 
 
 class ObjectDetectionNode(Node):
@@ -72,6 +92,14 @@ class ObjectDetectionNode(Node):
             callback_group=self._visibility_cbg,
         )
         self.hand_detected_pub = self.create_publisher(Bool, 'hand_detected', 10)
+        # 2026-07-11 (HMI 재구축 Phase 4): hand 체크 타이머가 이미 0.3초마다 단일
+        # 프레임 추론을 하고 있어서(예전엔 has_label()이 결과를 hand 여부 bool
+        # 하나로 접어버리고 나머지는 버렸음), 그 결과를 hmi_ros_bridge가 재사용할
+        # 수 있게 전체 detection도 같이 발행한다 - 추가 추론 없음(자원 사용량
+        # 불변, 아래 _hand_check_timer_callback 참고). hmi_interface/
+        # vision_bridge.py가 지금 자체 YOLO 모델을 또 로드하는 중복을 없애기
+        # 위한 것 - 그 파일은 이 커밋에서 건드리지 않는다(다음 단계 작업).
+        self.detections_pub = self.create_publisher(String, 'hmi/vision_detections', 10)
         self._hand_history = deque(maxlen=HAND_BUFFER_SIZE)
         self.create_timer(
             HAND_CHECK_INTERVAL_SEC, self._hand_check_timer_callback,
@@ -91,15 +119,30 @@ class ObjectDetectionNode(Node):
         아니라, 지금까지처럼 1장씩 찍은 결과를 이력에 쌓아 판단만 스무딩한다 —
         체크 속도/자원 사용량은 그대로다. 이력이 아직 안 찼을 때(막 시작 시)도
         같은 식(과반)으로 계산되므로 별도 예외 처리가 필요 없다.
+
+        2026-07-11 (HMI 재구축 Phase 4): 예전엔 여기서 self.model.has_label()을
+        불러 hand 여부 bool 하나만 얻고 나머지 감지 결과는 버렸다. 이제
+        self.model.detect_frame()으로 같은 추론 1회 호출에서 전체 감지 목록을
+        받아, hand 판정은 _extract_hand_detected()로 예전과 동일하게(threshold
+        0.9) 뽑아내고, 그 목록 전체를 hmi/vision_detections로도 발행한다 -
+        추론 횟수/주기/hand_detected 판정 로직은 전혀 바뀌지 않았다.
         """
         try:
             with self.img_node.spin_lock:
                 rclpy.spin_once(self.img_node, timeout_sec=0)
             frame = self.img_node.get_color_frame()
-            detected_this_frame = self.model.has_label(frame, HAND_LABEL)
+            detections = self.model.detect_frame(
+                frame, confidence_threshold=DETECTIONS_PUBLISH_CONFIDENCE_THRESHOLD
+            )
+            detected_this_frame = _extract_hand_detected(detections)
             self._hand_history.append(detected_this_frame)
             detected = sum(self._hand_history) > len(self._hand_history) / 2
             self.hand_detected_pub.publish(Bool(data=detected))
+
+            self.detections_pub.publish(String(data=json.dumps({
+                "stamp": time.time(),
+                "detections": detections,
+            })))
         except Exception as e:
             self.get_logger().error(f"hand 체크 타이머 오류, 계속 진행함: {e}")
 

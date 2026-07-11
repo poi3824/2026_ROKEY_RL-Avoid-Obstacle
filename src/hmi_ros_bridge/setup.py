@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'hmi_ros_bridge_server = hmi_ros_bridge.main:main',
+            'hmi_vision_stream = hmi_ros_bridge.vision_stream_node:main',
         ],
     },
 )

@@ -136,6 +136,42 @@ class YoloModel:
                 return True
         return False
 
+    def detect_frame(self, frame, confidence_threshold=0.5):
+        """단일 프레임 1장을 클래스 필터 없이 통째로 추론해 감지 목록을 반환한다
+        (has_label처럼 특정 라벨 하나만 boolean으로 접지 않고, 이름/점수/박스를
+        그대로 노출).
+
+        2026-07-11 (HMI 재구축 Phase 4): object_detection_node의 hand 체크
+        타이머(0.3초 간격)가 이미 프레임 1장씩 돌리고 있어서, 그 결과를 hand
+        판정에만 쓰고 버리는 대신 이 메서드로 전체 결과도 같이 뽑아 HMI용
+        토픽으로 발행한다 - has_label/is_fully_visible/get_best_detection은
+        전혀 건드리지 않았고(기존 pick/hand 안전 로직 무변경), 이 메서드는
+        순수 추가다. 추가 추론 호출이 생기는 게 아니라 detection.py 쪽에서
+        기존 추론 1회 호출 결과를 이 메서드로 감싸 재사용하는 방식이라
+        자원 사용량이 늘지 않는다.
+        """
+        if frame is None:
+            return []
+        with self._model_lock:
+            results = self.model([frame], verbose=False)
+        detections = []
+        for res in results:
+            names = res.names
+            boxes = res.boxes
+            if boxes is None:
+                continue
+            for box, score, label in zip(
+                boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist()
+            ):
+                if score < confidence_threshold:
+                    continue
+                detections.append({
+                    "label": names.get(int(label), str(int(label))),
+                    "score": round(float(score), 4),
+                    "box": [round(float(v), 1) for v in box],
+                })
+        return detections
+
     def get_best_detection(self, img_node, target):
         """bbox/score에 더해, seg 모델이면 grasp용 짧은 변 각도(angle_deg)와
         마스크 중심 픽셀(mask_center)도 반환한다.
