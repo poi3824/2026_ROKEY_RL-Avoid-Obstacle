@@ -1,6 +1,19 @@
+import "./TaskProgress.css";
+
 // task_status_event.schema.json을 source별로 분리 렌더링 - {manipulation, world_map}.
 // 하나의 Socket.IO 'task_status' 이벤트가 두 source를 다 실어나르므로, 상태를
 // 합치지 않고 트랙 2개를 항상 나란히 보여준다(한쪽 업데이트가 다른쪽을 덮어쓰면 안 됨).
+//
+// Safety(RUN/PAUSE/ESTOP)는 safety_status.schema.json 그대로 - Task 상태와 절대
+// 같은 모델로 섞지 않는다. 다만 화면상으로는 task가 safety 상태에 종속적으로
+// 보이므로(ESTOP/PAUSE면 진행 중이던 task도 멈춤) 이 카드 안에 같은 타일 스타일로
+// 같이 보여준다(NodeStatus의 LED 타일과 동일한 시각 언어: 라벨 + LED).
+const SAFETY_META = {
+  RUN: { label: "정상 진행", cls: "good" },
+  PAUSE: { label: "일시정지", cls: "warn" },
+  ESTOP: { label: "비상정지", cls: "critical" },
+};
+
 const STATUS_BADGE = {
   IDLE: "muted",
   WAITING: "warn",
@@ -13,9 +26,12 @@ function TaskTrack({ label, task }) {
   const badgeCls = STATUS_BADGE[task?.status] || "muted";
   const pct = task?.progress != null ? Math.round(task.progress * 100) : null;
   return (
-    <div className="task-track">
+    <div className={"task-track " + badgeCls}>
       <div className="task-track-head">
-        <span className="task-track-label">{label}</span>
+        <div className="task-track-label-group">
+          <span className={"led-lg " + badgeCls} />
+          <span className="task-track-label">{label}</span>
+        </div>
         <span className={"badge " + badgeCls}>{task?.status ?? "IDLE"}</span>
       </div>
       <div className="task-track-title">{task?.title || "진행 중인 작업 없음"}</div>
@@ -32,11 +48,23 @@ function TaskTrack({ label, task }) {
   );
 }
 
-export default function TaskProgress({ tasks }) {
+export default function TaskProgress({ tasks, safety }) {
+  const safetyMeta = SAFETY_META[safety?.state] || { label: "알 수 없음", cls: "muted" };
   return (
     <div className="card">
       <h3>Task 진행 상태</h3>
       <div className="task-track-grid">
+        <div className={"task-track " + safetyMeta.cls}>
+          <div className="task-track-head">
+            <div className="task-track-label-group">
+              <span className={"led-lg " + safetyMeta.cls} />
+              <span className="task-track-label">Safety</span>
+            </div>
+            <span className={"badge " + safetyMeta.cls}>{safety?.state ?? "-"}</span>
+          </div>
+          <div className="task-track-title">{safetyMeta.label}</div>
+          {safety?.reason ? <div className="task-track-detail">{safety.reason}</div> : null}
+        </div>
         <TaskTrack label="조작 (manipulation)" task={tasks?.manipulation} />
         <TaskTrack label="월드맵 (world_map)" task={tasks?.world_map} />
       </div>

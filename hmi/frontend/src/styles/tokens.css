@@ -79,5 +79,27 @@ table.hmi-table td { padding: 9px 10px; border-top: 1px solid var(--line); }
 .split-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 900px) { .split-row { grid-template-columns: 1fr; } }
 
+.node-tiles { display: flex; flex-wrap: wrap; gap: 8px; }
+.node-tile {
+  flex: 1 1 128px; min-width: 108px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  padding: 9px 11px 8px; display: flex; flex-direction: column; gap: 6px;
+}
+.node-tile-top { display: flex; align-items: center; justify-content: space-between; }
+.led-lg { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; }
+.led-lg.good { background: var(--good); box-shadow: 0 0 0 4px var(--good-bg); }
+.led-lg.warn { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-bg); }
+.led-lg.critical { background: var(--critical); box-shadow: 0 0 0 4px var(--critical-bg); }
+.node-tile-state { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; }
+.node-tile.good .node-tile-state { color: var(--good); }
+.node-tile.warn .node-tile-state { color: var(--warn); }
+.node-tile.critical .node-tile-state { color: var(--critical); }
+.node-tile-name { font-weight: 700; font-size: 12px; word-break: break-word; line-height: 1.25; }
+.node-tile-desc { font-size: 10px; color: var(--muted); line-height: 1.3; }
+
+/* RobotViewer의 .viewer3d-canvas-wrap(420px)과 높이를 맞춰 대시보드에서 카메라/
+   월드맵 블록 크기가 나란히 어긋나 보이지 않게 한다. */
+.vision-stream-wrap { height: 420px; border-radius: 10px; overflow: hidden; background: #10141b; }
+
 .hmi-table a { color: var(--accent); font-weight: 600; text-decoration: none; }
 .hmi-table a:hover { text-decoration: underline; }

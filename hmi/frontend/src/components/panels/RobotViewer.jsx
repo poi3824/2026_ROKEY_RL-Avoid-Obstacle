@@ -6,11 +6,11 @@ import "./RobotViewer.css";
 // 끼워넣던 것)를 @react-three/fiber 컴포넌트로 포팅 - iframe 없이 React 안에서
 // 직접 렌더링한다. hmi_bridge 패키지는 계속 무수정/병행 운영 중이며, 실제
 // 대체가 검증된 뒤에만 별도로 deprecated 처리한다.
-export default function RobotViewer({ scanId: requestedScanId }) {
+export default function RobotViewer({ scanId: requestedScanId, bare = false }) {
   const { scanIds, scanId, setScanId, points, obstacles, error, loading } = useWorldMapScan(requestedScanId);
 
   return (
-    <div className="card">
+    <div className={bare ? "" : "card"}>
       <div className="viewer3d-head">
         <h3 style={{ margin: 0 }}>World / Robot 3D Viewer</h3>
         <select
