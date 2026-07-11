@@ -14,5 +14,7 @@ export const fetchDbSummary = () => apiGet("/api/db/summary");
 export const fetchPickAttempts = (limit = 50) => apiGet(`/api/db/pick_attempts?limit=${limit}`);
 export const fetchVoiceEvents = (limit = 50) => apiGet(`/api/db/voice_events?limit=${limit}`);
 export const fetchWorldmapScans = (limit = 30) => apiGet(`/api/db/worldmap_scans?limit=${limit}`);
+export const fetchWorldmapList = () => apiGet("/api/worldmap/list");
+export const fetchWorldmapLatest = () => apiGet("/api/worldmap/latest");
 export const fetchWorldmapObstacles = (scanId) => apiGet(`/api/worldmap/${encodeURIComponent(scanId)}/obstacles`);
 export const fetchWorldmapPoints = (scanId) => apiGet(`/api/worldmap/${encodeURIComponent(scanId)}/points`);

@@ -1,0 +1,7 @@
+.viewer3d-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.viewer3d-head select {
+  border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font-size: 12px;
+  background: var(--surface); color: var(--ink); max-width: 260px;
+}
+.viewer3d-canvas-wrap { height: 420px; border-radius: 10px; overflow: hidden; background: #111; }
+.viewer3d-status { margin-top: 8px; font-size: 11.5px; color: var(--muted); }

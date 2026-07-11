@@ -1,14 +1,16 @@
-# hmi/ - React + Flask-SocketIO 통합 HMI (재구축 중)
+# hmi/ - React + Flask-SocketIO 통합 HMI
 
 이 디렉터리는 콜콘(colcon) 패키지가 아닌 일반 웹 프로젝트다. ROS와의 유일한
-접점은 `src/hmi_ros_bridge`(Phase 3에서 생성됨)가 `/ros` Socket.IO
-네임스페이스에 클라이언트로 붙는 것뿐이며, 이 안의 Flask 프로세스는 rclpy를
-직접 import하지 않는다.
+접점은 `src/hmi_ros_bridge`가 `/ros` Socket.IO 네임스페이스에 클라이언트로
+붙는 것뿐이며, 이 안의 Flask 프로세스는 rclpy를 직접 import하지 않는다.
+
+**Phase 0~6 전부 구현/검증 완료** (React Mock Dashboard → DB API 이관 →
+Voice Socket.IO → Vision/Detection → Safety/Task 상태 → R3F 3D Viewer).
 
 **기존 `src/hmi_bridge`, `src/hmi_interface`는 이 작업과 무관하게 그대로
-동작한다** - Phase 6까지 병행 운영하고, 새 구조가 완전히 그 기능을 대체한
-뒤에만 deprecated 처리한다. 지금 이 디렉터리를 추가한다고 기존 서비스가
-바뀌거나 중단되지 않는다.
+동작한다** - 의도적으로 삭제/종료하지 않고 병행 운영 중이다. Phase 6까지
+끝나 기능적으로는 대체 가능하지만, deprecated 처리 및 최종 삭제는 사용자가
+직접 검토한 뒤 결정할 일이라 이 세션에서 건드리지 않았다.
 
 ## 구조
 
@@ -70,13 +72,19 @@ src/hmi_ros_bridge/test/test_bridge_node.py -p no:anyio` (실제 rclpy 그래프
 `-p no:anyio`가 필요한 이유: `python-socketio[client]`가 끌어온 `anyio`가 이 환경의
 구버전 시스템 pytest(6.2.5)와 안 맞는 pytest 플러그인을 등록해서 죽는 문제가 있음.
 
-## 프로덕션 실행 구조 (목표, Phase 6에서 확정)
+### 5. World / Robot 3D Viewer (Phase 6)
+`hmi/backend`가 떠 있으면(Phase 2의 `/api/worldmap/*` 그대로 재사용) 별도
+설정 없이 동작한다 - React가 `@react-three/fiber`로 `data/world_maps/`의
+저장된 스캔을 직접 렌더링한다(기존 hmi_bridge의 iframe 뷰어를 대체, 그쪽은
+계속 무수정 병행 운영).
+
+## 프로덕션 실행 구조 (아직 미확정, 후속 작업)
 
 - `npm run build` → `hmi/frontend/dist/`
 - Flask가 `dist/`를 정적 파일로 서빙 + `/api/*`, Socket.IO만 담당 (단일 origin, 단일 포트)
 - `socketio.run()`의 내장 Werkzeug dev 서버 대신 gunicorn + eventlet(또는 동급) 뒤에서 실행
-- 영상(MJPEG)은 Phase 4까지 별도 포트(`VITE_VISION_STREAM_URL`)로 유지, 이후 `/stream/vision`
-  same-origin proxy로 통합 검토
+- 영상(MJPEG, `hmi_vision_stream` 8767)은 현재 별도 포트(`VITE_VISION_STREAM_URL`)로
+  유지 중, 이후 `/stream/vision` same-origin proxy로 통합 검토(아직 미구현)
 
 ## Socket.IO 네임스페이스
 
