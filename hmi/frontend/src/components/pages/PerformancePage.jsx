@@ -1,3 +1,6 @@
+import RlErrorTrend from "../panels/RlErrorTrend";
+import GraspAngleGauge from "../panels/GraspAngleGauge";
+
 export default function PerformancePage({ summary }) {
   return (
     <div>
@@ -6,6 +9,10 @@ export default function PerformancePage({ summary }) {
         <div className="kpi"><div className="label">오늘 Pick 시도</div><div className="value">{summary?.total ?? "–"}</div></div>
         <div className="kpi"><div className="label">오늘 Pick 성공</div><div className="value">{summary?.success ?? "–"}</div></div>
         <div className="kpi"><div className="label">오늘 성공률</div><div className="value">{summary?.success_rate != null ? summary.success_rate + "%" : "–"}</div></div>
+      </div>
+      <div className="split-row">
+        <RlErrorTrend />
+        <GraspAngleGauge />
       </div>
     </div>
   );

@@ -36,7 +36,7 @@ export default function App() {
   const taskStatus = useTaskStatus();
 
   return (
-    <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={bridgeConnected}>
+    <AppShell activeId={activeId} onSelect={setActiveId} bridgeConnected={bridgeConnected} safety={safetyStatus}>
       {activeId === "dashboard" && (
         <div>
           <NodeStatus />

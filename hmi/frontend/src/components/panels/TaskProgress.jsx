@@ -1,4 +1,5 @@
 import "./TaskProgress.css";
+import { SAFETY_META } from "../../constants/safety";
 
 // task_status_event.schema.json을 source별로 분리 렌더링 - {manipulation, world_map}.
 // 하나의 Socket.IO 'task_status' 이벤트가 두 source를 다 실어나르므로, 상태를
@@ -8,11 +9,8 @@ import "./TaskProgress.css";
 // 같은 모델로 섞지 않는다. 다만 화면상으로는 task가 safety 상태에 종속적으로
 // 보이므로(ESTOP/PAUSE면 진행 중이던 task도 멈춤) 이 카드 안에 같은 타일 스타일로
 // 같이 보여준다(NodeStatus의 LED 타일과 동일한 시각 언어: 라벨 + LED).
-const SAFETY_META = {
-  RUN: { label: "정상 진행", cls: "good" },
-  PAUSE: { label: "일시정지", cls: "warn" },
-  ESTOP: { label: "비상정지", cls: "critical" },
-};
+// SAFETY_META는 layout/SafetyBanner.jsx와 공유(constants/safety.js) - 전역 배너와
+// 이 카드가 같은 라벨/색상을 쓰도록 한 곳에서만 정의한다.
 
 const STATUS_BADGE = {
   IDLE: "muted",

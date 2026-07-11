@@ -31,3 +31,20 @@ main { flex: 1; min-width: 0; padding: 26px 30px 60px; }
 .topbar h1 { font-size: 21px; font-weight: 800; margin: 0; letter-spacing: -.01em; }
 .topbar-right { display: flex; align-items: center; gap: 12px; }
 .topbar .clock { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* PAUSE/ESTOP일 때만 뜨는 전역 배너 - 탭을 옮겨도 계속 보이도록 main 맨 위,
+   Header 위에 둔다. */
+.safety-banner {
+  display: flex; align-items: center; gap: 12px;
+  border-radius: var(--radius); padding: 10px 16px; margin-bottom: 14px;
+  font-size: 13px; font-weight: 600;
+}
+.safety-banner.warn { background: var(--warn-bg); color: var(--warn); }
+.safety-banner.critical { background: var(--critical-bg); color: var(--critical); animation: safety-banner-pulse 1.4s ease-in-out infinite; }
+.safety-banner-badge { font-weight: 800; font-size: 11px; padding: 3px 10px; border-radius: 20px; background: rgba(255,255,255,.55); }
+.safety-banner-reason { color: var(--ink-soft); font-weight: 500; }
+
+@keyframes safety-banner-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(209,55,63,.35); }
+  50% { box-shadow: 0 0 0 6px rgba(209,55,63,0); }
+}

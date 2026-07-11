@@ -1,5 +1,6 @@
 import Sidebar, { NAV_GROUPS } from "./Sidebar";
 import Header from "./Header";
+import SafetyBanner from "./SafetyBanner";
 import "./AppShell.css";
 
 function titleFor(activeId) {
@@ -10,11 +11,12 @@ function titleFor(activeId) {
   return "";
 }
 
-export default function AppShell({ activeId, onSelect, bridgeConnected, children }) {
+export default function AppShell({ activeId, onSelect, bridgeConnected, safety, children }) {
   return (
     <div className="app">
       <Sidebar activeId={activeId} onSelect={onSelect} />
       <main>
+        <SafetyBanner safety={safety} />
         <Header title={titleFor(activeId)} bridgeConnected={bridgeConnected} />
         <div className="tab-content">{children}</div>
       </main>
