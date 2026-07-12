@@ -13,7 +13,7 @@ export default function VoiceConsole({ voice, logs, onToggleRecord }) {
   const scale = 1 + (voice?.level ?? 0) * 0.9;
 
   return (
-    <>
+    <div className="voice-page">
       <div className="card orb-card">
         <h3>실시간 음성 상태</h3>
         <div className="orb-wrap">
@@ -33,7 +33,10 @@ export default function VoiceConsole({ voice, logs, onToggleRecord }) {
           </button>
         </div>
       </div>
-      <LogPanel title="get_keyword_node 로그" entries={logs} emptyText="아직 로그 없음 - get_keyword_node에서 뭔가 로그를 찍으면 여기 나타납니다." />
-    </>
+      <LogPanel
+        className="fill" title="get_keyword_node 로그" entries={logs}
+        emptyText="아직 로그 없음 - get_keyword_node에서 뭔가 로그를 찍으면 여기 나타납니다."
+      />
+    </div>
   );
 }

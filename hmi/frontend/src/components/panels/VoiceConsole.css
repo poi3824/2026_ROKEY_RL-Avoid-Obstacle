@@ -1,3 +1,9 @@
+/* 2026-07-12: 오브 카드(녹음 버튼)는 항상 고정 높이로 보이고, 로그 패널이 남은
+   세로 공간을 전부 채워서 그 안에서만 스크롤되게 한다(AppShell.css의 main/
+   tab-content flex 체인 참고) - 페이지 자체는 스크롤할 필요가 없어진다. */
+.voice-page { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 18px; }
+.voice-page .orb-card { flex: 0 0 auto; margin-bottom: 0; }
+
 .orb-card { display: flex; flex-direction: column; align-items: center; padding: 30px 20px 26px; }
 .orb-wrap { display: flex; flex-direction: column; align-items: center; gap: 18px; }
 .orb-rings { position: relative; width: 168px; height: 168px; display: flex; align-items: center; justify-content: center; }

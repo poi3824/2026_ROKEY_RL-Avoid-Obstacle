@@ -55,6 +55,15 @@ table.hmi-table th {
 }
 table.hmi-table td { padding: 9px 10px; border-top: 1px solid var(--line); }
 
+/* 2026-07-12: DB 탭(로봇로그/STT/월드) 테이블이 계속 늘어나 페이지 자체가
+   길어지는 대신, 이 박스 안에서만 스크롤되게 한다. 데이터는 이미 백엔드에서
+   최신순(DESC)으로 와서 순서는 안 건드림 - 스크롤 컨테이너만 추가. 헤더는
+   스크롤해도 계속 보이도록 sticky. */
+.table-scroll { max-height: 460px; overflow-y: auto; }
+.table-scroll table.hmi-table thead th {
+  position: sticky; top: 0; background: var(--surface); z-index: 1;
+}
+
 .note {
   display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; color: var(--warn);
   background: var(--warn-bg); border-radius: 10px; padding: 10px 14px; margin-bottom: 18px;
