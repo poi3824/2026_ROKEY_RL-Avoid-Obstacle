@@ -9,6 +9,11 @@ export function useRlReachProgress() {
   const [steps, setSteps] = useState([]);
   const [goalThresholdMm, setGoalThresholdMm] = useState(null);
   const [done, setDone] = useState(false);
+  // tiltX/tiltY: ZAxisAlignGauge 레이더용 - 트렌드가 아니라 "가장 최근 스텝" 값만
+  // 필요해서 배열로 누적하지 않는다(motion_executor.move_via_rl()의 tilt_x/tilt_y 계산
+  // 주석 참고 - 목표 접근축의 로컬 X/Y축에 현재 TCP Z축을 내적한 값).
+  const [tiltX, setTiltX] = useState(null);
+  const [tiltY, setTiltY] = useState(null);
   const episodeIdRef = useRef(null);
 
   useEffect(() => {
@@ -23,10 +28,14 @@ export function useRlReachProgress() {
         // joint_limit_abort 등 pos_err_mm을 못 구한 종료 이벤트는 그래프에 안 찍는다.
         return data.pos_err_mm == null ? base : [...base, data.pos_err_mm];
       });
+      if (data.tilt_x != null && data.tilt_y != null) {
+        setTiltX(data.tilt_x);
+        setTiltY(data.tilt_y);
+      }
     }
     socket.on("rl_reach_progress", onStep);
     return () => socket.off("rl_reach_progress", onStep);
   }, []);
 
-  return { steps, goalThresholdMm, done };
+  return { steps, goalThresholdMm, done, tiltX, tiltY };
 }

@@ -536,6 +536,14 @@ class MotionExecutor:
         # 그대로 써서(_align_tcp_vertical과 동일한 함수) 실제 TCP가 도달해야 할 지점을 구한다.
         target_pos_m = rl.flange_posx_to_tcp_pos_m(target_pos)
 
+        # 2026-07-12: HMI Z축 정렬 레이더 게이지용 - "목표 접근축을 따라 내려다본 뷰"의
+        # 기준 평면(목표 자세 자신의 로컬 X/Y축)을 미리 구해둔다. target_pos의 orientation은
+        # 정책이 무시하지만(위 캐비어트 4), _align_tcp_vertical이 수렴 후 피벗할 최종
+        # 목표 자세이기도 해서 "정렬돼야 할 방향"의 기준으로 쓰기에 정확히 맞는 값이다.
+        target_rotation = Rotation.from_euler("ZYZ", target_pos[3:6], degrees=True)
+        target_x_axis = target_rotation.apply([1.0, 0.0, 0.0])
+        target_y_axis = target_rotation.apply([0.0, 1.0, 0.0])
+
         # 2026-07-12: HMI Performance 탭의 RL 스텝별 오차 차트용 - 호출 1번(= 에피소드
         # 1개)마다 새 id를 발급해서 on_rl_step 구독 쪽(프론트)이 "새 에피소드 시작"을
         # step==0 여부가 아니라 이 id 변화로 판단하게 한다(이벤트 유실에도 안전).
@@ -543,6 +551,7 @@ class MotionExecutor:
 
         prev_action = np.zeros(6, dtype=np.float32)
         pos_err_m = None  # max_steps=0(호출 안 됨)이면 아래 max_steps 도달 이벤트가 None을 그대로 보냄
+        tilt_x = tilt_y = None
         for step in range(max_steps):
             with self._dsr_lock:
                 current_posj_deg = self._get_current_posj()
@@ -569,6 +578,16 @@ class MotionExecutor:
                 flange_posx = self._get_current_posx()[0]
             tcp_pos_m = rl.flange_posx_to_tcp_pos_m(flange_posx)
             pos_err_m = float(np.linalg.norm(tcp_pos_m - target_pos_m))
+
+            # 2026-07-12: 목표 접근축을 따라 내려다봤을 때 현재 TCP Z축이 찍히는 점의
+            # 좌표(목표 자세의 로컬 X/Y축에 대한 내적 = sin(기울기각)의 성분). ZAxisAlignGauge의
+            # 레이더 뷰가 그대로 쓴다 - 벡터가 단위벡터라 추가 정규화가 필요 없다.
+            current_z_axis = Rotation.from_euler(
+                "ZYZ", flange_posx[3:6], degrees=True
+            ).apply([0.0, 0.0, 1.0])
+            tilt_x = float(np.dot(current_z_axis, target_x_axis))
+            tilt_y = float(np.dot(current_z_axis, target_y_axis))
+
             print(
                 f"[MotionExecutor] RL reach step {step}: pos_err={pos_err_m * 100:.1f}cm "
                 f"(raw_action_norm={diag['raw_action_norm']:.3f})"
@@ -578,23 +597,30 @@ class MotionExecutor:
                 print(f"[MotionExecutor] RL reach 목표 도달 ({step + 1}스텝, {pos_err_m * 100:.1f}cm)")
                 self._emit_rl_step(
                     episode_id, step, pos_err_m, goal_threshold_m, max_steps,
-                    done=True, reason="goal_reached",
+                    done=True, reason="goal_reached", tilt_x=tilt_x, tilt_y=tilt_y,
                 )
                 return True
 
-            self._emit_rl_step(episode_id, step, pos_err_m, goal_threshold_m, max_steps, done=False)
+            self._emit_rl_step(
+                episode_id, step, pos_err_m, goal_threshold_m, max_steps, done=False,
+                tilt_x=tilt_x, tilt_y=tilt_y,
+            )
 
         print(f"[MotionExecutor] RL reach: max_steps({max_steps}) 도달, 목표 미도달")
         self._emit_rl_step(
             episode_id, max_steps - 1, pos_err_m, goal_threshold_m, max_steps,
-            done=True, reason="max_steps",
+            done=True, reason="max_steps", tilt_x=tilt_x, tilt_y=tilt_y,
         )
         return False
 
-    def _emit_rl_step(self, episode_id, step, pos_err_m, goal_threshold_m, max_steps, done, reason=None):
+    def _emit_rl_step(
+        self, episode_id, step, pos_err_m, goal_threshold_m, max_steps, done, reason=None,
+        tilt_x=None, tilt_y=None,
+    ):
         """on_rl_step 콜백이 있으면 HMI용 페이로드로 감싸 호출한다(없으면 조용히 무시 -
         기존 print() 기반 동작과 100% 동일하게 유지). pos_err_m은 joint_limit_abort처럼
-        아직 한 번도 못 구했을 수 있어 None을 허용한다."""
+        아직 한 번도 못 구했을 수 있어 None을 허용한다. tilt_x/tilt_y도 마찬가지 이유로
+        None을 허용한다(joint_limit_abort 시점엔 이번 스텝의 flange_posx를 아직 안 읽음)."""
         if self.on_rl_step is None:
             return
         self.on_rl_step({
@@ -605,6 +631,8 @@ class MotionExecutor:
             "max_steps": max_steps,
             "done": done,
             "reason": reason,
+            "tilt_x": tilt_x,
+            "tilt_y": tilt_y,
         })
 
     def _align_tcp_vertical(self, target_orientation):
