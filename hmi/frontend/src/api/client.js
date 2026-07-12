@@ -16,5 +16,8 @@ export const fetchVoiceEvents = (limit = 50) => apiGet(`/api/db/voice_events?lim
 export const fetchWorldmapScans = (limit = 30) => apiGet(`/api/db/worldmap_scans?limit=${limit}`);
 export const fetchWorldmapList = () => apiGet("/api/worldmap/list");
 export const fetchWorldmapLatest = () => apiGet("/api/worldmap/latest");
-export const fetchWorldmapObstacles = (scanId) => apiGet(`/api/worldmap/${encodeURIComponent(scanId)}/obstacles`);
-export const fetchWorldmapPoints = (scanId) => apiGet(`/api/worldmap/${encodeURIComponent(scanId)}/points`);
+export const fetchWorldmapVariants = (scanId) => apiGet(`/api/worldmap/${encodeURIComponent(scanId)}/variants`);
+export const fetchWorldmapObstacles = (scanId, variant = "hough") =>
+  apiGet(`/api/worldmap/${encodeURIComponent(scanId)}/obstacles?variant=${variant}`);
+export const fetchWorldmapPoints = (scanId, variant = "raw") =>
+  apiGet(`/api/worldmap/${encodeURIComponent(scanId)}/points?variant=${variant}`);

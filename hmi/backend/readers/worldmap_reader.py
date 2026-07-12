@@ -76,16 +76,86 @@ def load_summary(scan_id):
         return json.load(f)
 
 
-def load_obstacles(scan_id):
-    summary = load_summary(scan_id)
-    return summary.get("clusters", [])
+def _icp_points_path(scan_dir):
+    return os.path.join(scan_dir, "icp_offline_result", "merged_base_roi_icp.npy")
 
 
-def load_points(scan_id, voxel_size_m=POINTS_DOWNSAMPLE_VOXEL_M, max_points=MAX_POINTS_RETURNED):
+def _dbscan_only_path(scan_dir):
+    return os.path.join(scan_dir, "dbscan_only_result", "obstacles.json")
+
+
+def has_icp_variant(scan_id):
+    """offline_icp_experiment.py를 이 scan_dir에 돌려서 만든 ICP 결과가 있는지.
+
+    ICP는 pose별로 registration_icp를 반복 호출해야 해서(수 초 단위) 요청마다
+    즉석 계산하기엔 무겁다 - offline_icp_experiment.py로 미리 만들어둔
+    icp_offline_result/merged_base_roi_icp.npy가 있을 때만 "icp" variant를
+    제공한다(월드맵 실측 검증 슬라이드 작업에서 6개 스캔에 대해 이미 생성함).
+    """
+    try:
+        scan_dir = _scan_dir(scan_id)
+    except (ValueError, FileNotFoundError):
+        return False
+    return os.path.exists(_icp_points_path(scan_dir))
+
+
+def has_dbscan_only_variant(scan_id):
+    """dbscan_only_result/obstacles.json이 미리 계산되어 있는지.
+
+    cluster_points(split_merged_with_hough=False)는 내부적으로 pcd.cluster_dbscan()
+    (open3d)을 쓰는데, 이 Flask 백엔드의 venv에는 open3d가 없다(ROS/무거운 인식
+    라이브러리를 백엔드에 안 붙인다는 원칙 때문 - worldmap_reader.py 상단 주석 참고).
+    그래서 offline_icp_experiment.py와 같은 패턴으로 시스템 python(open3d 있음)에서
+    미리 계산해 저장해두고, 백엔드는 파일만 읽는다.
+    """
+    try:
+        scan_dir = _scan_dir(scan_id)
+    except (ValueError, FileNotFoundError):
+        return False
+    return os.path.exists(_dbscan_only_path(scan_dir))
+
+
+def get_variants(scan_id):
+    return {
+        "icp_available": has_icp_variant(scan_id),
+        "dbscan_only_available": has_dbscan_only_variant(scan_id),
+    }
+
+
+def load_obstacles(scan_id, variant="hough"):
+    """variant: "hough"(기본, world_map_summary.json에 저장된 라이브 결과 그대로) 또는
+    "dbscan_only"(Hough 2차 분리 없이 DBSCAN 클러스터만 - has_dbscan_only_variant()가
+    True인 스캔에서만 사용 가능, 없으면 FileNotFoundError).
+    """
+    if variant == "hough":
+        summary = load_summary(scan_id)
+        return summary.get("clusters", [])
+    if variant != "dbscan_only":
+        raise ValueError(f"알 수 없는 obstacle variant: {variant}")
+
     scan_dir = _scan_dir(scan_id)
-    npy_path = os.path.join(scan_dir, "merged_base_roi.npy")
+    path = _dbscan_only_path(scan_dir)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"dbscan_only_result/obstacles.json이 없습니다: {scan_dir} (variant=dbscan_only)")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f).get("obstacles", [])
+
+
+def load_points(scan_id, variant="raw", voxel_size_m=POINTS_DOWNSAMPLE_VOXEL_M, max_points=MAX_POINTS_RETURNED):
+    """variant: "raw"(기본, TF+Ground-Z만 - 현재 라이브 파이프라인이 만드는 것과 동일)
+    또는 "icp"(offline_icp_experiment.py가 미리 만들어둔 ICP 보정 map, has_icp_variant()
+    가 True인 스캔에서만 사용 가능 - 없으면 FileNotFoundError).
+    """
+    scan_dir = _scan_dir(scan_id)
+    if variant == "raw":
+        npy_path = os.path.join(scan_dir, "merged_base_roi.npy")
+    elif variant == "icp":
+        npy_path = _icp_points_path(scan_dir)
+    else:
+        raise ValueError(f"알 수 없는 points variant: {variant}")
+
     if not os.path.exists(npy_path):
-        raise FileNotFoundError(f"merged_base_roi.npy가 없습니다: {scan_dir}")
+        raise FileNotFoundError(f"{os.path.basename(npy_path)}가 없습니다: {scan_dir} (variant={variant})")
 
     points = np.load(npy_path)
     if voxel_size_m and voxel_size_m > 0 and points.shape[0] > 0:

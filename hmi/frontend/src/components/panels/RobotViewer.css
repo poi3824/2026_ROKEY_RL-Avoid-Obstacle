@@ -5,3 +5,15 @@
 }
 .viewer3d-canvas-wrap { height: 420px; border-radius: 10px; overflow: hidden; background: #111; }
 .viewer3d-status { margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+
+/* 2026-07-12: TF-only/TF+ICP, DBSCAN만/+Hough 분리 비교 토글 - .subtabs/.subtab-btn과
+   같은 pill 스타일을 재사용해 대시보드 전체 톤을 유지한다. */
+.variant-toggle-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.variant-toggle-group { display: flex; gap: 4px; background: var(--page); border-radius: 20px; padding: 3px; }
+.variant-btn {
+  border: none; background: transparent; color: var(--ink-soft);
+  font-size: 11.5px; font-weight: 700; padding: 5px 12px; border-radius: 20px; cursor: pointer;
+}
+.variant-btn:hover:not(.active):not(:disabled) { background: var(--line); }
+.variant-btn.active { background: var(--accent); color: #fff; }
+.variant-btn:disabled { color: var(--muted); cursor: not-allowed; opacity: 0.55; }

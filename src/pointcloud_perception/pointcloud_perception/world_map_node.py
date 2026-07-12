@@ -23,6 +23,7 @@
 # 순수 알고리즘은 world_map_algo.py로 분리되어 있다 - rclpy 등 ROS 의존성이 없어야
 # offline_icp_experiment.py가 ROS 워크스페이스 없이 저장된 스캔으로 튜닝할 수 있다.
 import json
+import os
 import time
 import uuid
 
@@ -464,6 +465,7 @@ class ScanWorker(Node):
             corrected_per_pose_points,
             ground_z_alignment,
             icp_mapping_report,
+            ground_quality,
         )
 
 
@@ -533,7 +535,7 @@ class WorldMapNode(Node):
             )
 
         try:
-            merged_points, poses, per_pose_points, ground_z_alignment, icp_mapping_report = (
+            merged_points, poses, per_pose_points, ground_z_alignment, icp_mapping_report, ground_quality = (
                 self.worker.run_scan(on_pose_progress=on_pose_progress)
             )
         except Exception as e:
@@ -581,6 +583,46 @@ class WorldMapNode(Node):
                 self.get_logger().warn(f"debug visualization: {err}")
         except Exception as e:
             self.get_logger().warn(f"debug visualization failed: {e}")
+
+        # 2026-07-12: HMI World/Robot 3D Viewer의 TF-only/TF+ICP, DBSCAN만/+Hough분리
+        # 비교 토글이 매 스캔마다 자동으로 데이터를 갖도록, 지금까지 offline_icp_
+        # experiment.py로 수동으로만 만들던 두 variant를 여기서 같이 저장한다.
+        # 실패해도(open3d 없음 등) 장애물 응답 자체는 살아있어야 하므로 별도 try/except -
+        # debug visualization과 같은 패턴. DBSCAN-only는 수백ms면 끝나지만, ICP는
+        # pose마다 registration_icp를 반복 호출해서 수 초가 더 걸릴 수 있다(오프라인
+        # 재생 테스트 기준 스캔당 수 초 ~ 10초대) - 음성 명령 "월드맵 업데이트해줘"의
+        # 서비스 응답이 그만큼 늦어지는 걸 감수하기로 함(HMI 3D 비교 뷰어 작업 논의 참고).
+        try:
+            dbscan_only_clusters = cluster_points(merged_points, ground_z=ground_z, split_merged_with_hough=False)
+            dbscan_only_dir = os.path.join(scan_dir, "dbscan_only_result")
+            os.makedirs(dbscan_only_dir, exist_ok=True)
+            with open(os.path.join(dbscan_only_dir, "obstacles.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "note": "cluster_points(..., split_merged_with_hough=False) - HMI 3D 뷰어 DBSCAN-only variant",
+                    "obstacles": dbscan_only_clusters,
+                }, f, indent=2)
+        except Exception as e:
+            self.get_logger().warn(f"dbscan-only variant 저장 실패: {e}")
+
+        # ENABLE_ICP_MAPPING이 True면 merged_points가 이미 ICP 결과라 별도 variant가
+        # 의미 없다 - False(현재 기본값)일 때만 TF-only 결과 옆에 비교용으로 추가 저장.
+        if not ENABLE_ICP_MAPPING:
+            try:
+                icp_merged_points, icp_offline_report = build_map_with_icp(per_pose_points, poses, ground_quality)
+                icp_dir = os.path.join(scan_dir, "icp_offline_result")
+                os.makedirs(icp_dir, exist_ok=True)
+                np.save(os.path.join(icp_dir, "merged_base_roi_icp.npy"), icp_merged_points)
+                if OPEN3D_AVAILABLE and icp_merged_points.shape[0] > 0:
+                    pcd = o3d.geometry.PointCloud()
+                    pcd.points = o3d.utility.Vector3dVector(icp_merged_points.astype(np.float64))
+                    o3d.io.write_point_cloud(os.path.join(icp_dir, "merged_base_roi_icp.ply"), pcd)
+                with open(os.path.join(icp_dir, "icp_mapping_report.json"), "w", encoding="utf-8") as f:
+                    json.dump({
+                        "note": "handle_update()가 스캔마다 자동 생성 - offline_icp_experiment.py 수동 실행과 동일한 build_map_with_icp() 결과",
+                        "icp_mapping": icp_offline_report,
+                    }, f, indent=2)
+            except Exception as e:
+                self.get_logger().warn(f"ICP variant 저장 실패: {e}")
 
         msg = build_world_map_update_msg(clusters, scan_dir, self.get_clock().now().to_msg())
         self.obstacle_pub.publish(msg)
