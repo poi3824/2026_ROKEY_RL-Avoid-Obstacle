@@ -28,18 +28,16 @@ export default function PerformancePage({ summary, pickAttempts }) {
         <div className="kpi"><div className="label">오늘 Pick 성공</div><div className="value">{summary?.success ?? "–"}</div></div>
         <div className="kpi"><div className="label">오늘 성공률</div><div className="value">{summary?.success_rate != null ? summary.success_rate + "%" : "–"}</div></div>
       </div>
-      <div className="split-row">
-        {rl.steps.length > 0 ? (
-          <RlErrorTrend steps={rl.steps} goalThresholdMm={rl.goalThresholdMm} isMock={false} />
-        ) : (
-          <RlErrorTrend />
-        )}
-        {graspDelta != null ? (
-          <GraspAngleGauge deltaDeg={graspDelta} isMock={false} />
-        ) : (
-          <GraspAngleGauge />
-        )}
-      </div>
+      {rl.steps.length > 0 ? (
+        <RlErrorTrend steps={rl.steps} goalThresholdMm={rl.goalThresholdMm} isMock={false} />
+      ) : (
+        <RlErrorTrend />
+      )}
+      {graspDelta != null ? (
+        <GraspAngleGauge deltaDeg={graspDelta} isMock={false} />
+      ) : (
+        <GraspAngleGauge />
+      )}
     </div>
   );
 }
