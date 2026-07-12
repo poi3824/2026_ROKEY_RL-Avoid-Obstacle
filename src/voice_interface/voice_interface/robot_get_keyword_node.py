@@ -191,12 +191,19 @@ class GetKeyword(Node):
 - 안전 정지 명령이 포함된 경우에는 이 명령보다 STOP을 우선합니다.
 - 손 감지 무시 명령이면 객체, 출발지, 목적지, 복귀 위치를 모두 IGNORE_HAND로 출력하세요.
 
+<취소 규칙>
+- 사용자가 "잘못 말했어", "다시 말할게", "처음부터 다시 말할게"처럼 방금 한 말을
+  취소하고 새로 다시 말하겠다는 취지로 말하면 취소 명령으로 판단합니다.
+- 안전 정지 명령이 포함된 경우에는 이 명령보다 STOP을 우선합니다.
+- 취소 명령이면 객체, 출발지, 목적지, 복귀 위치를 모두 CANCEL로 출력하세요.
+
 <출력 형식>
 - 반드시 아래 형식으로만 출력하세요.
 객체 / 출발지 / 목적지 / 복귀위치
 STOP / STOP / STOP / STOP
 RESUME / RESUME / RESUME / RESUME
 IGNORE_HAND / IGNORE_HAND / IGNORE_HAND / IGNORE_HAND
+CANCEL / CANCEL / CANCEL / CANCEL
 
 반드시 아래 형식으로만 출력하세요.
 
@@ -358,6 +365,24 @@ RESUME / RESUME / RESUME / RESUME
 
 출력:
 RESUME / RESUME / RESUME / RESUME
+
+입력:
+잘못 말했어
+
+출력:
+CANCEL / CANCEL / CANCEL / CANCEL
+
+입력:
+다시 말할게
+
+출력:
+CANCEL / CANCEL / CANCEL / CANCEL
+
+입력:
+처음부터 다시 말할게
+
+출력:
+CANCEL / CANCEL / CANCEL / CANCEL
 
 <사용자 입력>
 "{user_input}"
@@ -583,6 +608,18 @@ RESUME / RESUME / RESUME / RESUME
                     self._speak_locally("손 아닌 걸로 하겠습니다")
                     break
 
+                if "CANCEL" in obj:
+                    # 2026-07-12: 슬롯필링 되묻기 루프("어느 색깔을 옮겨드릴까요?" 등)에
+                    # 갇혔을 때 탈출하는 명령 — STOP과 달리 안전 정지(ESTOP 래치)를
+                    # 걸지 않고, 그냥 대기 중이던 슬롯만 지우고 세션을 끝낸다(다음은
+                    # 다시 웨이크워드부터). brain_node/로봇 Action은 안 건드림 - 이
+                    # 시점엔 아직 명령이 완성 안 돼서 brain_node로 넘어가지도 않았다.
+                    self.get_logger().warn(f"명령 취소 감지(LLM): STT='{output_message}'")
+                    self.voice_logger.log_event("cancel", output_message)
+                    self._clear_pending_slots()
+                    self._speak_locally("취소했습니다")
+                    break
+
                 if "WORLD_MAP" in obj:
                     # 2026-07-11 버그 수정: WORLD_MAP은 물체/위치가 아니라 특수 값이라
                     # _first_valid()가 의도적으로 제외한다(다른 슬롯과 섞였을 때 실제
@@ -721,10 +758,10 @@ RESUME / RESUME / RESUME / RESUME
         )
 
     def _first_valid(self, values):
-        """values(리스트)에서 UNKNOWN/STOP/RESUME/WORLD_MAP/IGNORE_HAND가 아닌
+        """values(리스트)에서 UNKNOWN/STOP/RESUME/WORLD_MAP/IGNORE_HAND/CANCEL이 아닌
         첫 값을 반환한다. 없으면 None(이번 발화에서 이 슬롯은 안 채워졌다는 뜻)."""
         for value in values:
-            if value not in ("UNKNOWN", "STOP", "RESUME", "WORLD_MAP", "IGNORE_HAND"):
+            if value not in ("UNKNOWN", "STOP", "RESUME", "WORLD_MAP", "IGNORE_HAND", "CANCEL"):
                 return value
         return None
 
