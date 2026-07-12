@@ -35,8 +35,11 @@ export default function PerformancePage({ summary, pickAttempts }) {
         ) : (
           <GraspAngleGauge />
         )}
-        {/* TODO: z_align_deg 실시간 소스 연결 전까지 mock 표시 (ZAxisAlignGauge.jsx 참고) */}
-        <ZAxisAlignGauge />
+        {rl.tiltX != null ? (
+          <ZAxisAlignGauge tiltX={rl.tiltX} tiltY={rl.tiltY} isMock={false} />
+        ) : (
+          <ZAxisAlignGauge />
+        )}
       </div>
       {rl.steps.length > 0 ? (
         <RlErrorTrend steps={rl.steps} goalThresholdMm={rl.goalThresholdMm} isMock={false} height={480} />
