@@ -41,58 +41,39 @@ export default function GraspAngleGauge({ deltaDeg = MOCK_DELTA_DEG, isMock = tr
         비전 그립 각도 정렬 (짧은 면 기준)
         {isMock ? <span className="badge warn" style={{ marginLeft: 8 }}>MOCK DATA</span> : null}
       </h3>
-      <div className="gauge-layout">
-        <svg
-          className="gauge-svg"
-          viewBox={`0 0 ${W} ${H}`}
-          role="img"
-          aria-label="비전이 감지한 물체 각도와 그립 기준축 사이의 정렬 오차 게이지"
-        >
-          {ZONES.map((z) => {
-            const p1 = polar(z.from, R);
-            const p2 = polar(z.to, R);
-            return (
-              <path
-                key={z.from}
-                d={`M ${p1.x} ${p1.y} A ${R} ${R} 0 0 1 ${p2.x} ${p2.y}`}
-                fill="none" stroke={z.color} strokeWidth={ARC_WIDTH} strokeLinecap="butt"
-              />
-            );
-          })}
-          {[-90, -45, 0, 45, 90].map((d) => {
-            const p = polar(d, R + 18);
-            return (
-              <text key={d} x={p.x} y={p.y + 3} fill="var(--muted)" fontSize="10.5" textAnchor="middle">
-                {d}°
-              </text>
-            );
-          })}
-          <line x1={CX} y1={CY} x2={needleTip.x} y2={needleTip.y} stroke="var(--ink)" strokeWidth="3" strokeLinecap="round" />
-          <circle cx={CX} cy={CY} r="6" fill="var(--ink)" />
-          <text x={CX} y={CY + 34} fill="var(--ink)" fontSize="22" fontWeight="800" textAnchor="middle">
-            {deltaLabel > 0 ? "+" : ""}{deltaLabel}°
-          </text>
-        </svg>
-        <div className="gauge-side">
-          <div className="gauge-side-value">
-            {deltaLabel > 0 ? "+" : ""}{deltaLabel}°
-          </div>
-          <span className={"badge " + status.cls}>{status.label}</span>
-          <div className="gauge-legend">
-            <div className="gauge-legend-item">
-              <span className="gauge-legend-swatch" style={{ background: "var(--good)" }} />
-              <span>-20° ~ 20° · 짧은 면 정렬</span>
-            </div>
-            <div className="gauge-legend-item">
-              <span className="gauge-legend-swatch" style={{ background: "var(--warn)" }} />
-              <span>±20° ~ ±60° · 정렬 벗어남</span>
-            </div>
-            <div className="gauge-legend-item">
-              <span className="gauge-legend-swatch" style={{ background: "var(--critical)" }} />
-              <span>±60° ~ ±90° · 긴 면 근접</span>
-            </div>
-          </div>
-        </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        style={{ display: "block", width: "100%", maxWidth: W, height: "auto", margin: "0 auto" }}
+        role="img"
+        aria-label="비전이 감지한 물체 각도와 그립 기준축 사이의 정렬 오차 게이지"
+      >
+        {ZONES.map((z) => {
+          const p1 = polar(z.from, R);
+          const p2 = polar(z.to, R);
+          return (
+            <path
+              key={z.from}
+              d={`M ${p1.x} ${p1.y} A ${R} ${R} 0 0 1 ${p2.x} ${p2.y}`}
+              fill="none" stroke={z.color} strokeWidth={ARC_WIDTH} strokeLinecap="butt"
+            />
+          );
+        })}
+        {[-90, -45, 0, 45, 90].map((d) => {
+          const p = polar(d, R + 18);
+          return (
+            <text key={d} x={p.x} y={p.y + 3} fill="var(--muted)" fontSize="10.5" textAnchor="middle">
+              {d}°
+            </text>
+          );
+        })}
+        <line x1={CX} y1={CY} x2={needleTip.x} y2={needleTip.y} stroke="var(--ink)" strokeWidth="3" strokeLinecap="round" />
+        <circle cx={CX} cy={CY} r="6" fill="var(--ink)" />
+        <text x={CX} y={CY + 34} fill="var(--ink)" fontSize="22" fontWeight="800" textAnchor="middle">
+          {deltaLabel > 0 ? "+" : ""}{deltaLabel}°
+        </text>
+      </svg>
+      <div style={{ textAlign: "center", marginTop: -6 }}>
+        <span className={"badge " + status.cls}>{status.label}</span>
       </div>
     </div>
   );

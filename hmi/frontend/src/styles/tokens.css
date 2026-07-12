@@ -79,18 +79,6 @@ table.hmi-table td { padding: 9px 10px; border-top: 1px solid var(--line); }
 .split-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 900px) { .split-row { grid-template-columns: 1fr; } }
 
-.gauge-layout { display: flex; align-items: center; gap: 28px; }
-.gauge-svg { width: 320px; flex: 0 0 320px; height: auto; }
-.gauge-side { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
-.gauge-side-value { font-size: 32px; font-weight: 800; color: var(--ink); }
-.gauge-legend { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
-.gauge-legend-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-soft); }
-.gauge-legend-swatch { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 10px; }
-@media (max-width: 640px) {
-  .gauge-layout { flex-direction: column; align-items: stretch; }
-  .gauge-svg { width: 100%; flex: none; }
-  .gauge-side { align-items: center; text-align: center; }
-}
 
 .node-tiles { display: flex; flex-wrap: wrap; gap: 8px; }
 .node-tile {
