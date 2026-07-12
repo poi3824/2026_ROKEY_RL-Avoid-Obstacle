@@ -122,6 +122,13 @@ class MotionExecutor:
         # 2026-07-12: move_via_rl()이 매 스텝 호출 - motion_node가 hmi/rl_reach_progress로
         # 발행하도록 주입받음(없으면 print()만 하고 넘어감, 기존 동작 그대로).
         self.on_rl_step = on_rl_step
+        # 2026-07-12 버그 수정: _align_tcp_vertical()이 move_via_rl()과 같은
+        # episode_id/goal_threshold_m/max_steps를 재사용해 hmi/rl_reach_progress를
+        # 이어서 발행할 수 있도록 캐싱해둔다(아래 move_via_rl() 참고) - 새
+        # episode_id를 쓰면 RL 오차 차트가 "새 에피소드"로 오인해 리셋돼버린다.
+        self._last_rl_episode_id = None
+        self._last_rl_goal_threshold_m = None
+        self._last_rl_max_steps = None
         self._check_motion = check_motion  # DSR_ROBOT2.check_motion을 주입받음
         self._estop_event = estop_event  # robot_action_node의 threading.Event를 주입받음
         # 2026-07-07: object_detection_node가 /hand_detected 토픽으로 발행하는 걸
@@ -183,7 +190,7 @@ class MotionExecutor:
         # 재개도 amovel/amovej 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
         time.sleep(MOTION_START_SETTLE_SEC)
 
-    def move_linear(self, posx, on_angle_progress=None):
+    def move_linear(self, posx, on_angle_progress=None, on_tick=None):
         """amovel로 이동 명령을 큐잉하고, check_motion()을 폴링하며 완료를 기다린다.
 
         폴링 간격마다 dsr_node가 spin될 기회를 주기 때문에, 그 사이 들어온
@@ -204,6 +211,11 @@ class MotionExecutor:
         이 이동의 목표 orientation(posx[5])에서 얼마나 남았는지(deg, mod-180 정규화)를
         실어 호출한다 - pick()이 grasp_c로 회전+접근하는 hover_pos 이동에만 넘긴다
         (다른 이동은 그냥 안 넘기면 됨, 기본값 None이라 동작 변화 없음).
+
+        on_tick: 2026-07-12 추가. on_angle_progress와 달리 계산 없이 매 폴링 틱마다
+        현재 flange posx(get_current_posx()[0])를 그대로 실어 호출만 한다 - 호출부가
+        원하는 값(예: _align_tcp_vertical()의 tilt_x/tilt_y)을 알아서 계산하게 하는
+        범용 훅이다. 기본값 None이면 아무 일도 안 함.
         """
         self._check_cancelled()
 
@@ -218,8 +230,8 @@ class MotionExecutor:
             self._mwait()
             return
 
-        self._poll_until_idle(posx, on_angle_progress=on_angle_progress)
-        self._poll_until_idle(posx, on_angle_progress=on_angle_progress)  # stale-idle 재확인, 위 docstring 참고
+        self._poll_until_idle(posx, on_angle_progress=on_angle_progress, on_tick=on_tick)
+        self._poll_until_idle(posx, on_angle_progress=on_angle_progress, on_tick=on_tick)  # stale-idle 재확인, 위 docstring 참고
 
         self._check_cancelled()
         if self._estop_event is not None and self._estop_event.is_set():
@@ -253,17 +265,21 @@ class MotionExecutor:
         if self._estop_event is not None and self._estop_event.is_set():
             raise EmergencyStop("이동 중 응급 정지 감지")
 
-    def _poll_until_idle(self, pos, reissue=None, on_angle_progress=None):
+    def _poll_until_idle(self, pos, reissue=None, on_angle_progress=None, on_tick=None):
         """check_motion()이 IDLE을 보고할 때까지 폴링하며, 매 주기 _handle_interrupts()로
         손 감지 일시정지/응급 정지를 처리한다. move_linear()/move_joint()가 이 함수를
         연달아 두 번 호출해서 stale-idle 오탐을 잡는다(move_linear() docstring 참고).
 
-        on_angle_progress: move_linear()의 동명 파라미터 참고 - 주어지면 매 폴링 틱마다
-        (IDLE 확인 전 포함) 현재 wrist yaw 기준 남은 정렬 오차를 계산해 호출한다.
+        on_angle_progress/on_tick: move_linear()의 동명 파라미터 참고.
         """
         time.sleep(MOTION_START_SETTLE_SEC)
         while True:
             self._emit_angle_progress(pos, on_angle_progress)
+            if on_tick is not None:
+                with self._dsr_lock:
+                    current_posx = self._get_current_posx()
+                if current_posx is not None:
+                    on_tick(current_posx[0])
             with self._dsr_lock:
                 motion_state = self._check_motion()
             if motion_state == _DR_STATE_IDLE:
@@ -548,6 +564,11 @@ class MotionExecutor:
         # 1개)마다 새 id를 발급해서 on_rl_step 구독 쪽(프론트)이 "새 에피소드 시작"을
         # step==0 여부가 아니라 이 id 변화로 판단하게 한다(이벤트 유실에도 안전).
         episode_id = str(uuid.uuid4())
+        # 버그 수정: _align_tcp_vertical()이 이 값들을 재사용해 같은 episode_id로
+        # hmi/rl_reach_progress를 이어서 발행할 수 있게 캐싱(위 __init__ 주석 참고).
+        self._last_rl_episode_id = episode_id
+        self._last_rl_goal_threshold_m = goal_threshold_m
+        self._last_rl_max_steps = max_steps
 
         prev_action = np.zeros(6, dtype=np.float32)
         pos_err_m = None  # max_steps=0(호출 안 됨)이면 아래 max_steps 도달 이벤트가 None을 그대로 보냄
@@ -644,6 +665,16 @@ class MotionExecutor:
         있다. 이후 하강/배치 단계가 정확한 자세에서 시작하도록 여기서 한 번 정렬한다 —
         TCP 위치(제자리)는 그대로 두고 orientation만 바꾸는 피벗이라, move_linear() 하나로
         처리할 수 있다.
+
+        2026-07-12 버그 수정: move_via_rl()의 스텝 루프 안에서만 tilt_x/tilt_y(HMI Z축
+        정렬 게이지용)를 발행했고, 정작 그 기울기를 실제로 교정하는 이 이동 중에는
+        발행이 전혀 없었다 - 그래서 게이지가 이 정렬이 끝날 때까지 move_via_rl()의
+        마지막 스텝 값에 멈춰 있는 것처럼 보였다. move_via_rl()과 완전히 동일한 공식
+        (target_x_axis/target_y_axis = target_orientation의 로컬 X/Y축)으로 매 폴링
+        틱마다 계산해 같은 hmi/rl_reach_progress로 이어서 발행한다 - 새 episode_id를
+        발급하면 RL 오차 차트가 "새 에피소드"로 오인해 방금 그린 차트를 리셋해버리므로,
+        move_via_rl()이 캐싱해둔 episode_id/goal_threshold_m/max_steps를 그대로 재사용한다
+        (move_via_rl()이 한 번도 안 불렸으면 - 있을 수 없는 경로지만 - 새로 발급).
         """
         from my_robot_pkg import dsr_policy_path as rl
 
@@ -655,7 +686,30 @@ class MotionExecutor:
         flange_pos_m = tcp_pos_m - r_new.apply(rl.FLANGE_TO_TCP_OFFSET_M)
         new_posx = list(flange_pos_m * 1000.0) + list(target_orientation)
 
-        self.move_linear(new_posx)
+        target_x_axis = r_new.apply([1.0, 0.0, 0.0])
+        target_y_axis = r_new.apply([0.0, 1.0, 0.0])
+        episode_id = self._last_rl_episode_id or str(uuid.uuid4())
+        goal_threshold_m = self._last_rl_goal_threshold_m or 0.0
+        max_steps = self._last_rl_max_steps or 0
+
+        def _on_tick(flange_posx):
+            current_z_axis = Rotation.from_euler(
+                "ZYZ", flange_posx[3:6], degrees=True
+            ).apply([0.0, 0.0, 1.0])
+            tilt_x = float(np.dot(current_z_axis, target_x_axis))
+            tilt_y = float(np.dot(current_z_axis, target_y_axis))
+            self._emit_rl_step(
+                episode_id, max_steps, None, goal_threshold_m, max_steps,
+                done=False, tilt_x=tilt_x, tilt_y=tilt_y,
+            )
+
+        self.move_linear(new_posx, on_tick=_on_tick)
+
+        # 정렬 완료 시점의 최종 tilt도 한 번 더 쏴서(폴링 마지막 틱과 실제 정지 사이
+        # 미세한 차이까지 반영) 게이지가 확실히 최종값에 멈추게 한다.
+        with self._dsr_lock:
+            final_flange_posx = self._get_current_posx()[0]
+        _on_tick(final_flange_posx)
 
     def place_via_rl(self, target_pos, feedback_cb=None):
         """pick 직후 hover 자세에서 RL 정책으로 target_pos 상단까지 옮기고, 도착
