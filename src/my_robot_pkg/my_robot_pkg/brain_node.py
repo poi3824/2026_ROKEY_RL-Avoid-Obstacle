@@ -311,10 +311,36 @@ class BrainNode(Node):
                     return
             else:
                 self._say("놓았습니다")
+                # 2026-07-12: place_via_rl()이 이제 놓은 자리 위 hover로 뜬 채 끝나므로
+                # (motion_executor.py 참고), 물체 하나 끝날 때마다 바로 home으로
+                # 보낸다 - 다중 물체 명령에서 "place → hover → home → 다음 물체
+                # scan/pick" 사이클이 물체마다 반복되게 하기 위함(마지막 물체
+                # 이후엔 아래 루프 밖 home 복귀와 중복되지만, 무해해서 그냥 둔다).
+                if not self._return_home(task_id, step_index, step_total):
+                    return
 
         # 2026-07-09 버그 수정: 이전엔 이 마지막 home 복귀만 결과를 확인 안 하고
         # 바로 "완료했습니다"를 말했다 — 복귀 도중 손 감지/ESTOP이 걸려도 사용자는
         # 정상 종료로 안내받았다. pick/place와 동일하게 결과를 확인한다.
+        if not self._return_home(task_id, step_total, step_total):
+            return
+        self._say("작업을 완료했습니다")
+        self._publish_task_status(
+            task_id, "COMPLETED", step_index=step_total, step_total=step_total,
+            title=f"{step_total}개 물체 처리 완료", phase="done",
+        )
+
+    def _return_home(self, task_id, step_index, step_total):
+        """POSITION_COORDS['home']으로 이동하고 결과를 확인한다(2026-07-12).
+
+        execute_command()의 두 지점 - 물체 하나 place 성공 직후(매 물체마다)와
+        전체 시퀀스 마지막 - 가 완전히 같은 확인/실패 처리를 공유하도록 뽑아냈다.
+        실패 시 ESTOP 여부에 따라 안내 문구만 다르고, 두 경우 다 False를 반환해
+        호출부(execute_command)가 남은 처리를 멈추게 한다.
+
+        Returns:
+            bool: home 복귀 성공 여부.
+        """
         move_res = self._send_move_to(POSITION_COORDS["home"], "home")
         if move_res is None or not move_res.success:
             reason = move_res.message if move_res else "no result"
@@ -325,15 +351,11 @@ class BrainNode(Node):
             else:
                 self._say("복귀에 실패했습니다")
             self._publish_task_status(
-                task_id, "FAILED", step_index=step_total, step_total=step_total,
+                task_id, "FAILED", step_index=step_index, step_total=step_total,
                 title="home 복귀 실패", detail=reason, phase="returning_home",
             )
-            return
-        self._say("작업을 완료했습니다")
-        self._publish_task_status(
-            task_id, "COMPLETED", step_index=step_total, step_total=step_total,
-            title=f"{step_total}개 물체 처리 완료", phase="done",
-        )
+            return False
+        return True
 
     # ---- Action / service 헬퍼 ----
     def _reset_safety(self):

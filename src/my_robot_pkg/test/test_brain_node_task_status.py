@@ -161,6 +161,58 @@ def test_execute_command_publishes_task_status_sequence():
         rclpy.shutdown()
 
 
+def test_execute_command_returns_home_after_each_object_in_multi_object_command():
+    """2026-07-12 기능 추가 회귀 테스트: 다중 물체 명령("빨간통 1번, 파란통 2번" 등)에서
+    home 복귀가 전체 시퀀스 끝에 한 번이 아니라 물체 하나 place 성공할 때마다
+    일어나는지 실제 rclpy 액션 서버로 검증한다(place → hover 복귀는 motion_executor.py
+    쪽 변경이라 fake Place 서버로는 직접 못 보고, 여기서는 brain_node.execute_command()가
+    물체마다 MoveTo(home)를 보내는지만 본다)."""
+    rclpy.init()
+    try:
+        fake = _FakeSupportNode()
+        fake_executor = MultiThreadedExecutor(num_threads=4)
+        fake_executor.add_node(fake)
+        fake_thread = threading.Thread(target=fake_executor.spin, daemon=True)
+        fake_thread.start()
+
+        fake.publish_run_state()
+        time.sleep(0.3)
+
+        brain = BrainNode()  # robot_init()에서 이미 MoveTo(home) 1회 발생
+
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            if brain._safety_state == SafetyState.RUN:
+                break
+            time.sleep(0.05)
+        assert brain._safety_state == SafetyState.RUN, "safety_state가 brain_node에 반영되지 않음"
+
+        home_count_before = fake.received_moveto_labels.count("home")
+
+        # 물체 2개짜리 명령 - "빨간통 1번, 파란통 2번" 같은 다중 물체 시나리오.
+        brain.execute_command("obj_A obj_B / scan scan / target1 target2 / home")
+
+        deadline = time.time() + 10.0
+        expected_home_count = home_count_before + 3  # 물체마다(2) + 시퀀스 끝(1)
+        while (
+            time.time() < deadline
+            and fake.received_moveto_labels.count("home") < expected_home_count
+        ):
+            time.sleep(0.05)
+
+        home_count_after = fake.received_moveto_labels.count("home")
+        assert home_count_after == expected_home_count, (
+            f"물체 2개 명령에서 home MoveTo가 정확히 3번(물체마다 1번 + 마지막 1번) "
+            f"와야 하는데: before={home_count_before}, after={home_count_after}, "
+            f"all={fake.received_moveto_labels}"
+        )
+
+        brain.destroy_node()
+        fake.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+
 def test_update_world_map_failure_still_returns_home():
     """2026-07-11 버그 수정 회귀 테스트: update_world_map 서비스가 실패(success=False)를
     반환해도 로봇이 home으로 복귀하는지 실제 rclpy 액션 서버로 검증한다(전엔 성공

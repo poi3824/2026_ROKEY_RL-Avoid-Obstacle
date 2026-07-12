@@ -755,7 +755,12 @@ class MotionExecutor:
             feedback_cb("releasing")
         self.gripper.open_gripper()
         self.gripper.wait_grip_done(GRIPPER_TIMEOUT_SEC)
-        self.move_linear(target_pos)
+        # 2026-07-12: 놓은 자리(target_pos)로 그대로 복귀하는 대신 hover_pos(위에서
+        # 이미 계산해둔 접근 높이)로 떠서 끝낸다 - pick()의 성공 후 PICK_RETRACT_Z
+        # 후퇴와 대칭되는 자리. brain_node.execute_command()가 이 직후 매 물체마다
+        # home으로 보내므로, 여기서 물체 바로 위에 떠 있어야 그 home 이동이 방금
+        # 놓은 물체를 스치지 않고 안전하게 시작된다.
+        self.move_linear(hover_pos)
         return True
 
     def apply_avoidance_cmd(self, cmd):
