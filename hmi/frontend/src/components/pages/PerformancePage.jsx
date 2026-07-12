@@ -1,5 +1,6 @@
 import RlErrorTrend from "../panels/RlErrorTrend";
 import GraspAngleGauge from "../panels/GraspAngleGauge";
+import ZAxisAlignGauge from "../panels/ZAxisAlignGauge";
 import { useRlReachProgress } from "../../hooks/useRlReachProgress";
 import { useGraspAngleDelta } from "../../hooks/useGraspAngleDelta";
 
@@ -28,15 +29,19 @@ export default function PerformancePage({ summary, pickAttempts }) {
         <div className="kpi"><div className="label">오늘 Pick 성공</div><div className="value">{summary?.success ?? "–"}</div></div>
         <div className="kpi"><div className="label">오늘 성공률</div><div className="value">{summary?.success_rate != null ? summary.success_rate + "%" : "–"}</div></div>
       </div>
+      <div className="split-row">
+        {graspDelta != null ? (
+          <GraspAngleGauge deltaDeg={graspDelta} isMock={false} />
+        ) : (
+          <GraspAngleGauge />
+        )}
+        {/* TODO: z_align_deg 실시간 소스 연결 전까지 mock 표시 (ZAxisAlignGauge.jsx 참고) */}
+        <ZAxisAlignGauge />
+      </div>
       {rl.steps.length > 0 ? (
-        <RlErrorTrend steps={rl.steps} goalThresholdMm={rl.goalThresholdMm} isMock={false} />
+        <RlErrorTrend steps={rl.steps} goalThresholdMm={rl.goalThresholdMm} isMock={false} height={480} />
       ) : (
-        <RlErrorTrend />
-      )}
-      {graspDelta != null ? (
-        <GraspAngleGauge deltaDeg={graspDelta} isMock={false} />
-      ) : (
-        <GraspAngleGauge />
+        <RlErrorTrend height={480} />
       )}
     </div>
   );
