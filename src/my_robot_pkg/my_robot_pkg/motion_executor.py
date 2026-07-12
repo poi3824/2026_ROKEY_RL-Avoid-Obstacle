@@ -88,7 +88,7 @@ class MotionExecutor:
         get_surface_z=None, redetect=None, grip_min_width=None, logger=None,
         check_motion=None, estop_event=None, hand_pause_event=None,
         dsr_lock=None, amovej=None, get_current_posj=None, get_current_posx=None,
-        cancel_event=None, get_grasp_delta=None, on_rl_step=None, on_grasp_logged=None,
+        cancel_event=None, get_grasp_delta=None, on_rl_step=None, on_grasp_progress=None,
     ):
         self._movel = movel  # amovel을 주입받는다 (위 모듈 주석 참고)
         self._movej = movej
@@ -113,10 +113,12 @@ class MotionExecutor:
         self.grip_min_width = grip_min_width if grip_min_width is not None else DEFAULT_GRIP_MIN_WIDTH
         self.logger = logger  # pick_logger.PickLogger를 주입받음 (없으면 기록 생략)
         self.get_grasp_delta = get_grasp_delta  # motion_node.get_last_grasp_delta를 주입받음 (없으면 None 기록)
-        # 2026-07-12: log_attempt() 직후 호출 - HMI Performance 탭의 그립 각도 게이지가
-        # 기존 5초 DB 폴링 대신 이걸로 즉시 갱신되도록(hmi/grasp_angle_delta, on_rl_step과
-        # 동일하게 motion_node가 발행). 없으면 호출 생략 - DB 로깅 자체는 그대로 유지.
-        self.on_grasp_logged = on_grasp_logged
+        # 2026-07-12 (v2): attempt 완료 후 딱 1번 쏘던 정적 스냅샷(on_grasp_logged)을
+        # 없애고, move_linear(hover_pos, ...)가 회전+접근하는 동안 매 폴링 틱마다
+        # "지금 wrist yaw가 grasp_c에서 얼마나 남았는지"를 실시간으로 쏘는 방식으로
+        # 바꿨다 - 탐지 시점의 오차에서 시작해 실제로 정렬되는 과정 자체가 게이지에
+        # 보이도록. DB 로깅(log_attempt)은 그대로 유지 - 이건 화면 표시 경로만 바뀜.
+        self.on_grasp_progress = on_grasp_progress
         # 2026-07-12: move_via_rl()이 매 스텝 호출 - motion_node가 hmi/rl_reach_progress로
         # 발행하도록 주입받음(없으면 print()만 하고 넘어감, 기존 동작 그대로).
         self.on_rl_step = on_rl_step
@@ -181,7 +183,7 @@ class MotionExecutor:
         # 재개도 amovel/amovej 재발행이라 처음과 같은 레이스가 재현될 수 있어 같은 지연을 준다.
         time.sleep(MOTION_START_SETTLE_SEC)
 
-    def move_linear(self, posx):
+    def move_linear(self, posx, on_angle_progress=None):
         """amovel로 이동 명령을 큐잉하고, check_motion()을 폴링하며 완료를 기다린다.
 
         폴링 간격마다 dsr_node가 spin될 기회를 주기 때문에, 그 사이 들어온
@@ -197,6 +199,11 @@ class MotionExecutor:
         들어와도 정지/재개가 안 되는 구멍이 새로 생겼다. 그래서 raw mwait() 대신
         같은 인터럽트 인지 폴링(_poll_until_idle)을 두 번 돌려서 stale idle을
         잡는다 — 두 번째 폴링 동안에도 손 감지/응급정지를 계속 체크한다.
+
+        on_angle_progress: 2026-07-12 추가. 주어지면 폴링 틱마다 현재 wrist yaw가
+        이 이동의 목표 orientation(posx[5])에서 얼마나 남았는지(deg, mod-180 정규화)를
+        실어 호출한다 - pick()이 grasp_c로 회전+접근하는 hover_pos 이동에만 넘긴다
+        (다른 이동은 그냥 안 넘기면 됨, 기본값 None이라 동작 변화 없음).
         """
         self._check_cancelled()
 
@@ -211,8 +218,8 @@ class MotionExecutor:
             self._mwait()
             return
 
-        self._poll_until_idle(posx)
-        self._poll_until_idle(posx)  # stale-idle 재확인, 위 docstring 참고
+        self._poll_until_idle(posx, on_angle_progress=on_angle_progress)
+        self._poll_until_idle(posx, on_angle_progress=on_angle_progress)  # stale-idle 재확인, 위 docstring 참고
 
         self._check_cancelled()
         if self._estop_event is not None and self._estop_event.is_set():
@@ -246,13 +253,17 @@ class MotionExecutor:
         if self._estop_event is not None and self._estop_event.is_set():
             raise EmergencyStop("이동 중 응급 정지 감지")
 
-    def _poll_until_idle(self, pos, reissue=None):
+    def _poll_until_idle(self, pos, reissue=None, on_angle_progress=None):
         """check_motion()이 IDLE을 보고할 때까지 폴링하며, 매 주기 _handle_interrupts()로
         손 감지 일시정지/응급 정지를 처리한다. move_linear()/move_joint()가 이 함수를
         연달아 두 번 호출해서 stale-idle 오탐을 잡는다(move_linear() docstring 참고).
+
+        on_angle_progress: move_linear()의 동명 파라미터 참고 - 주어지면 매 폴링 틱마다
+        (IDLE 확인 전 포함) 현재 wrist yaw 기준 남은 정렬 오차를 계산해 호출한다.
         """
         time.sleep(MOTION_START_SETTLE_SEC)
         while True:
+            self._emit_angle_progress(pos, on_angle_progress)
             with self._dsr_lock:
                 motion_state = self._check_motion()
             if motion_state == _DR_STATE_IDLE:
@@ -260,6 +271,19 @@ class MotionExecutor:
 
             self._handle_interrupts(pos, self.velocity, self.acc, reissue=reissue)
             time.sleep(MOTION_POLL_INTERVAL)
+
+    def _emit_angle_progress(self, target_pos, on_angle_progress):
+        """target_pos[5](목표 wrist yaw, deg)와 현재 실제 wrist yaw의 차이를
+        mod-180 정규화(그리퍼가 대칭이라 [-90,90) - motion_node.compute_grasp_c()와
+        동일 규칙)해서 on_angle_progress에 실어 호출한다. 콜백/get_current_posx
+        둘 다 없으면 조용히 넘어간다(기존 move_linear() 호출부는 영향 없음)."""
+        if on_angle_progress is None or self._get_current_posx is None:
+            return
+        with self._dsr_lock:
+            current_yaw = self._get_current_posx()[0][5]
+        target_yaw = target_pos[5]
+        delta_deg = ((target_yaw - current_yaw + 90.0) % 180.0) - 90.0
+        on_angle_progress(delta_deg)
 
     def sweep_to_detect(self, pose_a, pose_b, is_visible_cb,
                         start_visibility_cb=None, poll_visibility_cb=None,
@@ -388,7 +412,10 @@ class MotionExecutor:
             temp[2] = PICK_RETRACT_Z
             moving_pos = temp
 
-            self.move_linear(hover_pos)
+            # on_angle_progress: 이 이동의 orientation이 곧 grasp_c(짧은 변 정렬 목표)라
+            # HMI 그립 각도 게이지가 여기서만 실시간으로 갱신된다(아래 다른 move_linear
+            # 호출들은 정렬과 무관한 이동이라 안 넘김).
+            self.move_linear(hover_pos, on_angle_progress=self.on_grasp_progress)
 
             surface_z = self.get_surface_z() if self.get_surface_z else None
             if surface_z is not None:
@@ -418,8 +445,6 @@ class MotionExecutor:
                     obj_label, attempt + 1, surface_z, width, grip_detected, motion_done, success,
                     grasp_delta_deg,
                 )
-                if self.on_grasp_logged:
-                    self.on_grasp_logged(grasp_delta_deg)
 
             if success:
                 # 파지 성공 후 PICK_RETRACT_Z로 후퇴. 여기서 다음 move_linear(place
