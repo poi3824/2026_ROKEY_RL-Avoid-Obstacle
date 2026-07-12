@@ -69,7 +69,12 @@ GROUND_Z_HIST_BIN_M = 0.002
 GROUND_Z_MIN_POINTS_IN_BIN = 1000
 MAX_GROUND_Z_CORRECTION_M = 0.04
 
-ROI_MARGIN_MM = 80.0
+# 2026-07-12: x만 100mm 더 확장 - brain_node.POSITION_COORDS의 target1/2/3이 전부
+# x≈200mm인데, 기존 공통 마진(80mm)으로는 x_min이 203.81mm(START_POINT.x - 80)라
+# 시약통을 실제로 내려놓는 target 위치가 ROI 경계에 걸리거나 밖으로 빠져서 옮기기
+# 전/후 모습이 world map에 잘 안 잡혔다. y는 그대로 둔다(문제 없었음).
+ROI_MARGIN_X_MM = 180.0
+ROI_MARGIN_Y_MM = 80.0
 ROI_Z_MIN_M = -0.05
 ROI_Z_MAX_M = 0.60
 
@@ -342,10 +347,10 @@ def get_roi_bounds_m():
     xs = [START_POINT["x"], END_POINT["x"]]
     ys = [START_POINT["y"], END_POINT["y"]]
 
-    x_min_mm = min(xs) - ROI_MARGIN_MM
-    x_max_mm = max(xs) + ROI_MARGIN_MM
-    y_min_mm = min(ys) - ROI_MARGIN_MM
-    y_max_mm = max(ys) + ROI_MARGIN_MM
+    x_min_mm = min(xs) - ROI_MARGIN_X_MM
+    x_max_mm = max(xs) + ROI_MARGIN_X_MM
+    y_min_mm = min(ys) - ROI_MARGIN_Y_MM
+    y_max_mm = max(ys) + ROI_MARGIN_Y_MM
 
     return {
         "x_min_m": x_min_mm / 1000.0,
