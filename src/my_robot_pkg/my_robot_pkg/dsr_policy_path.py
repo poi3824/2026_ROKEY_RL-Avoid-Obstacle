@@ -132,14 +132,21 @@ try:
     from ament_index_python.packages import get_package_share_directory
 
     CHECKPOINT_PATH = os.path.join(
-        get_package_share_directory("my_robot_pkg"), "resource", "model_14000_smooth.pt"
+        get_package_share_directory("my_robot_pkg"), "resource", "model_10000_obs_avoid.pt"
     )
 except (ImportError, LookupError):
     # fallback for running this file directly (not as an installed ROS2 package), e.g. plain `python3
     # dsr_policy_path.py` from the source tree rather than `ros2 run`/an installed console_script.
     CHECKPOINT_PATH = os.path.join(
-        os.path.dirname(__file__), "..", "resource", "model_14000_smooth.pt"
+        os.path.dirname(__file__), "..", "resource", "model_10000_obs_avoid.pt"
     )
+# 2026-07-13: PureReach(model_14000_smooth.pt, 장애물 0개로 학습)에서 실제 장애물
+# 커리큘럼으로 학습된 iter 10000 체크포인트로 교체. actor 구조(60->128->128->6, ELU)는
+# 동일해서 로딩 코드는 변경 없음 -- curriculum_state(success_ema 0.992, collision_ema
+# 0.0003)로 실제 장애물 학습된 체크포인트임을 확인했다. obstacle 슬롯 규약(좌표계/
+# half_extent 의미)은 이 머신에 training config가 없어 100% 검증은 못했고, 실기
+# 관찰(raw_action이 장애물 유무에 따라 실제로 달라짐)로 1차 확인만 된 상태 --
+# 이상 동작 시 아래 obstacles_to_obs_block()의 half_extent/rel_pos 가정부터 의심할 것.
 DEFAULT_JOINT_POS_DEG = np.array([0.0, 0.0, 90.0, 0.0, 90.0, 180.0])
 DEFAULT_JOINT_POS_RAD = np.radians(DEFAULT_JOINT_POS_DEG)
 ACTION_SCALE = 0.1
@@ -216,6 +223,63 @@ _policy_mlp.eval()
 # did) put a value the network never saw during training into 15 of the 35 obstacle-block entries.
 _INACTIVE_SLOT = np.array([0.0, 0.0, -5.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 _OBSTACLES_ALL_INACTIVE = np.tile(_INACTIVE_SLOT, 5)  # 5 slots x 7 = 35
+MAX_OBSTACLE_SLOTS = 5
+
+# world_map_algo.RECORD_DIR과 동일한 경로 (pointcloud_perception 패키지 의존성을
+# 새로 만들지 않기 위해 여기서는 그냥 같은 절대경로를 하드코딩 -- HMI backend .env
+# fallback도 같은 방식으로 이 경로를 하드코딩하고 있어 이 레포에서 이미 쓰는 패턴).
+WORLD_MAPS_DIR = os.path.expanduser("~/RL-Avoid-Obstacle/data/world_maps")
+
+
+def load_latest_world_map_obstacles(world_maps_dir=WORLD_MAPS_DIR):
+    """가장 최근 world_map_update_* 스캔의 clusters를 반환한다. 스캔이 하나도 없으면
+    빈 리스트 -- move_via_rl()이 "월드맵 업데이트해줘"를 아직 한 번도 안 받은 상태에서도
+    죽지 않고 장애물 인식 없이(전부 비활성 슬롯) 그대로 동작해야 하기 때문에 예외를
+    던지지 않는다(2026-07-13 테스트 스크립트의 load_latest_world_map_obstacles()는
+    없으면 RuntimeError -- 대화형 테스트용이라 그게 맞았지만, 프로덕션 경로는 그래서는
+    안 된다는 차이가 있다)."""
+    import glob
+    import json
+
+    scan_dirs = sorted(glob.glob(os.path.join(world_maps_dir, "world_map_update_*")))
+    if not scan_dirs:
+        return []
+    summary_path = os.path.join(scan_dirs[-1], "world_map_summary.json")
+    try:
+        with open(summary_path) as f:
+            return json.load(f)["clusters"]
+    except (OSError, KeyError, ValueError):
+        return []
+
+
+def obstacles_to_obs_block(clusters):
+    """world_map cluster 리스트(centroid/safety_radius/safety_height) -> obstacle
+    observation 5-slot(35차원) 배열. rel_pos는 base_link 기준 centroid(m) 그대로
+    (target_pos와 같은 프레임이라는 가정), half_extent는 [safety_radius,
+    safety_radius, safety_height/2] (WorldMapObstacle.msg 주석: "RL/motion
+    planning에서 그대로 쓸 안전 여유 포함 값" -- 이 용도로 이미 계산돼 있는 필드).
+    5개 넘으면 앞 5개만 사용, 정렬/필터링은 하지 않는다."""
+    slots = []
+    for c in clusters[:MAX_OBSTACLE_SLOTS]:
+        cx, cy, cz = c["centroid"]
+        half_extent = [c["safety_radius"], c["safety_radius"], c["safety_height"] / 2.0]
+        slots.append(np.array([cx, cy, cz, *half_extent, 1.0], dtype=np.float32))
+    while len(slots) < MAX_OBSTACLE_SLOTS:
+        slots.append(_INACTIVE_SLOT.copy())
+    obs_block = np.concatenate(slots)
+    assert obs_block.shape[0] == 35
+    return obs_block
+
+
+def get_live_obstacles_obs():
+    """move_via_rl()이 스텝 루프 시작 전 한 번 호출 -- 최신 world_map 스캔을 읽어
+    obstacle observation으로 변환한다. 스캔이 없거나 읽기 실패하면 조용히
+    _OBSTACLES_ALL_INACTIVE로 폴백한다(장애물 인식 없이 기존 PureReach와 동일하게
+    동작 -- 스캔 파일 문제로 pick-and-place 전체가 죽으면 안 되므로)."""
+    clusters = load_latest_world_map_obstacles()
+    if not clusters:
+        return _OBSTACLES_ALL_INACTIVE
+    return obstacles_to_obs_block(clusters)
 
 # get_current_posx() reports the FLANGE (tool0) pose, not the actual RG2 gripper tip -- the controller's
 # own TCP/tool setting (set_tcp/get_tcp) doesn't apply while under external/PC control (see conversation
@@ -235,16 +299,17 @@ def flange_posx_to_tcp_pos_m(flange_posx):
     return flange_pos_m + R_flange_to_base.apply(FLANGE_TO_TCP_OFFSET_M)
 
 
-def _build_obs(joint_pos_rad, joint_vel_rad_s, target_pos_m, target_quat_wxyz, prev_action):
+def _build_obs(joint_pos_rad, joint_vel_rad_s, target_pos_m, target_quat_wxyz, prev_action, obstacles_obs=None):
+    obstacles_obs = _OBSTACLES_ALL_INACTIVE if obstacles_obs is None else obstacles_obs
     joint_pos_rel = joint_pos_rad - DEFAULT_JOINT_POS_RAD
     obs = np.concatenate(
-        [joint_pos_rel, joint_vel_rad_s, target_pos_m, target_quat_wxyz, _OBSTACLES_ALL_INACTIVE, prev_action]
+        [joint_pos_rel, joint_vel_rad_s, target_pos_m, target_quat_wxyz, obstacles_obs, prev_action]
     ).astype(np.float32)
     assert obs.shape[0] == 60, f"expected 60-dim obs, got {obs.shape[0]}"
     return obs
 
 
-def policy_step(current_posj_deg, target_pos_m, prev_action, target_quat_wxyz=None):
+def policy_step(current_posj_deg, target_pos_m, prev_action, target_quat_wxyz=None, obstacles_obs=None):
     """한 스텝 분의 정책 추론 + SETTLING_RATIO 적용까지 마친 다음 관절 목표를 계산한다.
 
     motion_executor.MotionExecutor.move_via_rl()과 아래 run_policy_live() 둘 다 이 함수 하나를
@@ -256,6 +321,9 @@ def policy_step(current_posj_deg, target_pos_m, prev_action, target_quat_wxyz=No
         target_pos_m: 목표 TCP 위치(x,y,z), base frame, meters. orientation은 정책이
             무시한다(모듈 docstring 캐비어트 4) -- 여기 넘길 필요 없음.
         prev_action: 이전 스텝의 raw_action(np.ndarray, 6). 첫 스텝은 zeros(6).
+        obstacles_obs: 35차원 obstacle observation(get_live_obstacles_obs()/
+            obstacles_to_obs_block() 결과). None이면 전부 비활성 슬롯(기존 PureReach와
+            동일하게 장애물 인식 없이 동작) -- 2026-07-13 추가.
 
     Returns:
         (target_joint_pos_deg, raw_action, diag)
@@ -267,7 +335,7 @@ def policy_step(current_posj_deg, target_pos_m, prev_action, target_quat_wxyz=No
     joint_vel_rad_s = np.zeros(6, dtype=np.float32)  # 캐비어트 6: 실측 대신 항상 0
 
     joint_pos_rad = np.radians(np.asarray(current_posj_deg, dtype=np.float64))
-    obs = _build_obs(joint_pos_rad, joint_vel_rad_s, target_pos_m, target_quat_wxyz, prev_action)
+    obs = _build_obs(joint_pos_rad, joint_vel_rad_s, target_pos_m, target_quat_wxyz, prev_action, obstacles_obs)
     with torch.no_grad():
         raw_action = _policy_mlp(torch.from_numpy(obs[None, :])).numpy()[0]
     raw_action = np.clip(np.nan_to_num(raw_action, nan=0.0), -ACTION_CLAMP, ACTION_CLAMP)

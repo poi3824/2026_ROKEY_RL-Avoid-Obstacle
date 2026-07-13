@@ -3,8 +3,11 @@
 # robot_action_node가 import해서 같은 프로세스 안에서 사용한다 (별도 ROS 노드 아님,
 # 토픽/서비스가 아니라 그냥 함수 호출로 연결됨).
 #
-# 나중에 장애물 회피(rl_avoidance_node)가 붙으면, 이동(transit) 구간의
-# move_linear를 /avoidance_cmd 반영 버전으로 바꾸는 지점이 이 클래스가 된다.
+# 2026-07-13: 장애물 회피는 이 주석이 원래 가리키던 rl_avoidance_node/
+# /avoidance_cmd(별도 노드, dx/dy/dz Cartesian 보정) 경로 대신, move_via_rl()
+# 자체가 쓰는 정책(dsr_policy_path)의 observation에 장애물을 직접 태우는
+# 방식으로 붙었다 -- 새 체크포인트(model_10000_obs_avoid.pt)의 action이 그
+# /avoidance_cmd와 다른 6-DOF 관절 delta라 두 설계가 호환되지 않는다.
 #
 # 2026-07: move_linear는 movel(동기)이 아니라 amovel(비동기)을 주입받아 쓴다.
 # DSR_ROBOT2 소스 확인 결과 movel/amovel은 컨트롤러로 보내는 sync_type 값만 다르고,
@@ -552,6 +555,14 @@ class MotionExecutor:
         # 그대로 써서(_align_tcp_vertical과 동일한 함수) 실제 TCP가 도달해야 할 지점을 구한다.
         target_pos_m = rl.flange_posx_to_tcp_pos_m(target_pos)
 
+        # 2026-07-13: 장애물 회피 학습된 체크포인트(model_10000_obs_avoid.pt)로 교체 --
+        # 최신 world_map 스캔을 스텝 루프 시작 전에 한 번만 읽어서 obstacle observation으로
+        # 변환한다(스텝마다 다시 읽지 않음 -- 장애물은 스캔 시점에 고정된 정적 정보라 매
+        # 스텝 파일을 다시 열 이유가 없다). 스캔이 아직 없으면 get_live_obstacles_obs()가
+        # 조용히 전부-비활성 슬롯으로 폴백하므로 pick-and-place 자체는 죽지 않는다.
+        obstacles_obs = rl.get_live_obstacles_obs()
+        print(f"[MotionExecutor] RL reach obstacles_obs (35d): {obstacles_obs.tolist()}")
+
         # 2026-07-12: HMI Z축 정렬 레이더 게이지용 - "목표 접근축을 따라 내려다본 뷰"의
         # 기준 평면(목표 자세 자신의 로컬 X/Y축)을 미리 구해둔다. target_pos의 orientation은
         # 정책이 무시하지만(위 캐비어트 4), _align_tcp_vertical이 수렴 후 피벗할 최종
@@ -578,7 +589,7 @@ class MotionExecutor:
                 current_posj_deg = self._get_current_posj()
 
             target_joint_pos_deg, prev_action, diag = rl.policy_step(
-                current_posj_deg, target_pos_m, prev_action
+                current_posj_deg, target_pos_m, prev_action, obstacles_obs=obstacles_obs
             )
 
             ok, worst = rl.check_joint_limit_safety(target_joint_pos_deg)
