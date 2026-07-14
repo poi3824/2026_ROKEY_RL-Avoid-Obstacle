@@ -1,149 +1,585 @@
-# 2026_ROKEY_RL-Avoid-Obstacle
+# RealSense YOLOv8 3D Object Position Service
 
-Doosan 협동로봇(m0609) 기반 음성 pick & place 워크스페이스. YOLO(세그멘테이션)로 물체를 인식하고, 음성 명령(웨이크워드 + STT + LLM)으로 지정한 통을 집어 목표 위치에 놓는다. 손 감지/음성 정지 안전 기능 포함.
+RealSense 깊이 카메라와 YOLOv8을 이용해 지정된 공구를 탐지하고, 카메라 좌표계 기준 3차원 위치 `(x, y, z)`를 반환하는 ROS 2 서비스 패키지입니다.
 
-## 구성 패키지
-
-- `my_robot_pkg` — `brain_node`(오케스트레이터) + `motion_node`(로봇/그리퍼 제어, DSR_ROBOT2 연동)
-- `object_detection` — RealSense + YOLO seg로 물체 3D 위치/각도, 손 감지
-- `voice_interface` — 웨이크워드(openWakeWord) + STT(Whisper) + LLM(GPT-4o) 명령 파싱
-- `safety_monitor` — 손 감지/음성 정지 통합 판단 + 하드 정지
-- `robot_interfaces`, `od_msg`, `obstacle_avoidance_msgs` — 커스텀 액션/서비스/메시지 인터페이스
-- `pointcloud_perception` — 월드맵 스캔(`world_map_node`, "월드맵 업데이트" 음성 명령으로 트리거)
-- `obstacle_avoidance` — `rl_avoidance_node`, 월드맵/실시간 장애물 정보를 구독해 회피 명령을 내는 노드(policy 추론은 아직 stub)
+![ROS2](https://img.shields.io/badge/ROS%202-distro%20확인%20필요-22314E?logo=ros&logoColor=white)
+![Python](https://img.shields.io/badge/Python-사용-3776AB?logo=python&logoColor=white)
+![YOLOv8](https://img.shields.io/badge/YOLO-v8-00FFFF?logo=yolo&logoColor=black)
+![License](https://img.shields.io/badge/License-확인%20필요-lightgrey)
 
 ---
 
-## 1. 사전 준비 (외부 의존성)
+## Overview
 
-이 워크스페이스 자체에는 로봇 드라이버가 들어있지 않다. 아래를 **별도 워크스페이스**에 미리 설치/빌드해두고, 이 워크스페이스보다 먼저 소스(source)해야 한다.
+이 프로젝트는 **RealSense D400 계열 깊이 카메라**와 **커스텀 학습 YOLOv8n 모델**을 사용해 공구를 탐지하고, RGB 이미지의 탐지 좌표와 정렬된 Depth 데이터를 결합하여 공구의 3차원 위치를 계산합니다.
 
-- **ROS2 Humble**
-- **Doosan 로봇 드라이버**: [doosan-robot2](https://github.com/DoosanRobotics/doosan-robot2) (`dsr_common2`, `dsr_controller2`, `dsr_hardware2`, `dsr_msgs2`, `dsr_bringup2`) — `DSR_ROBOT2`/`DR_init` 모듈과 `dsr_msgs2` 서비스/메시지를 `motion_node`, `safety_monitor_node`가 직접 import한다.
-- **Intel RealSense SDK + ROS2 래퍼**: `librealsense2`, `realsense2_camera` — D435/D435i 기준.
-- 로봇 컨트롤러(`dsr_bringup2`)와 RealSense 카메라 노드는 **이 워크스페이스의 launch에 안 들어있다** — 사용자가 직접 먼저 띄워야 한다.
+ROS 2 클라이언트가 찾고자 하는 공구 이름을 `/get_3d_position` 서비스에 전달하면, 시스템은 약 1초 동안 여러 프레임을 수집한 뒤 IoU 기반 그룹화와 다수결 투표를 수행하여 안정적인 탐지 결과를 생성합니다.
 
-## 2. Python 패키지 설치
+계산된 위치는 카메라 좌표계 기준으로 반환됩니다.
 
-`package.xml`/`setup.py`에 rosdep으로 안 잡히는 pip 전용 의존성들이다:
-
-```bash
-pip install --user ultralytics opencv-python numpy scipy \
-    openai langchain langchain-openai python-dotenv \
-    pyaudio sounddevice openwakeword websockets open3d
+```text
+[x, y, z]
 ```
 
-- `ultralytics`가 `torch`를 자동 설치한다(CPU 전용이면 기본 설치로 충분, GPU 가속하려면 CUDA 빌드 별도 설치).
-- `pyaudio`는 시스템에 `portaudio19-dev`가 필요할 수 있다: `sudo apt install portaudio19-dev`.
-- `websockets`는 `hmi_interface`의 `hmi_voice_bridge`(STT-TTS 탭 오브 애니메이션용 브릿지)가 사용한다.
-- `open3d`는 `pointcloud_perception`의 voxel 다운샘플링/ICP 잔차보정에 쓰인다 - 없어도 `world_map_algo.py`가
-  `try/except`로 감싸서 죽지는 않지만, 해당 기능들이 조용히 스킵된다(2026-07-10에 누락 발견 후 추가).
+`T_gripper2camera.npy` hand-eye calibration 변환 행렬이 포함되어 있어, 로봇 팔 pick-and-place 시스템의 인지 모듈로 연동할 수 있도록 설계되었습니다.
 
-## 3. 내 컴퓨터/로봇 셋업에 맞게 반드시 바꿔야 하는 값들
+![demo](docs/demo.gif)
 
-**여기가 이 README의 핵심이다.** 아래 값들은 다른 로봇 셀/컴퓨터에서 그대로 쓰면 안 되고, 각자 환경에서 다시 측정/설정해야 한다.
+> 서비스 응답 좌표계는 카메라 좌표계이며 단위는 meter입니다.
 
-### 3.1 로봇 ID / 모델
+---
 
-- `src/my_robot_pkg/my_robot_pkg/motion_node.py` — `ROBOT_ID = "dsr01"`, `ROBOT_MODEL = "m0609"`
-- `src/safety_monitor/safety_monitor/safety_monitor_node.py` — `robot_id` 파라미터(기본 `"dsr01"`, `motion_node`의 `ROBOT_ID`와 반드시 일치해야 함)
+## Features
 
-`dsr_bringup2`를 띄울 때 지정한 네임스페이스/모델과 같아야 한다.
+- RealSense RGB, 정렬된 Depth, Camera Info 토픽 구독
+- 커스텀 학습 YOLOv8n 모델을 이용한 공구 5종 탐지
+- 1초간 다중 프레임 수집
+- IoU 기반 탐지 결과 그룹화
+- 클래스 다수결 투표를 이용한 탐지 안정화
+- RGB 픽셀 좌표와 Depth 값을 이용한 3차원 위치 계산
+- Camera Intrinsics `fx`, `fy`, `ppx`, `ppy` 활용
+- ROS 2 서비스 `/get_3d_position` 제공
+- 탐지 실패 시 `[0.0, 0.0, 0.0]` 반환
+- RealSense 토픽 시각화용 디버그 패키지 제공
 
-### 3.2 그리퍼 (OnRobot RG2, Modbus TCP)
+지원하는 공구 클래스는 다음과 같습니다.
 
-- `src/my_robot_pkg/my_robot_pkg/motion_node.py` — `TOOLCHARGER_IP = "192.168.1.1"`, `TOOLCHARGER_PORT = "502"`
-- 그리퍼 최대 폭/힘이 다르면 `src/my_robot_pkg/my_robot_pkg/gripper.py`의 `RG2Gripper.__init__` 기본값(`max_width=1100`, `max_force=400`) 확인
-- 통 크기가 다르면 재빌드 없이 런치 인자로 조정: `grip_min_width_mm` (launch 파일 인자, 기본 30.0)
+| Index | Class |
+|---:|---|
+| 0 | `drill` |
+| 1 | `hammer` |
+| 2 | `pliers` |
+| 3 | `screwdriver` |
+| 4 | `wrench` |
 
-### 3.3 로봇 자세 좌표 (POSITION_COORDS)
+---
 
-- `src/my_robot_pkg/my_robot_pkg/brain_node.py`의 `POSITION_COORDS` — `home`/`scan`/`target1~3`을 `[x, y, z, rx, ry, rz]`(mm, deg, ZYZ)로 정의.
-- **이건 로봇 셀(테이블/물체 배치)마다 완전히 다르다.** 티칭 펜던트나 `get_current_posx()`로 실제 원하는 위치를 하나씩 찍어서 다시 채워야 한다.
+## Architecture
 
-### 3.4 카메라-그리퍼 캘리브레이션
+### 데이터 흐름
 
-- `src/my_robot_pkg/resource/T_gripper2camera.npy` — 그리퍼 TCP 기준 카메라 위치/자세 4x4 변환행렬(hand-eye calibration 결과물).
-- 카메라를 다른 위치/각도로 마운트했다면 **반드시 새로 캘리브레이션**해야 한다. 이 파일이 틀리면 3D 위치 계산 전체가 어긋난다(예: 물체 대신 옆 배경의 depth를 읽는 등).
+```mermaid
+flowchart TD
+    CAMERA["RealSense Camera"]
 
-### 3.5 grasp yaw 캘리브레이션 (미완료 상태로 커밋됨)
+    RGB["/camera/camera/color/image_raw<br/>RGB Image"]
+    DEPTH["/camera/camera/aligned_depth_to_color/image_raw<br/>Aligned Depth Image"]
+    INFO["/camera/camera/color/camera_info<br/>Camera Intrinsics"]
 
-- `src/my_robot_pkg/my_robot_pkg/motion_node.py` — `GRASP_AXIS_IMG_ANGLE_DEG = 0.0`, `GRASP_ANGLE_SIGN = 1.0`
-- 세그멘테이션으로 구한 물체 회전각을 그리퍼 wrist yaw(C)로 변환할 때 쓰는 상수인데, **아직 실제 하드웨어로 캘리브레이션 안 된 placeholder 값**이다. 실사용 전에 `object_detection/object_detection/angle_probe.py`로 실측해서 채워야 한다.
+    IMG["ImgNode<br/>realsense.py"]
+    DETECTION["ObjectDetectionNode<br/>detection.py"]
+    YOLO["YoloModel<br/>yolo.py"]
 
-### 3.6 마이크 장치 인덱스
+    MODEL["yolov8n_tools_0122.pt"]
+    SERVICE["/get_3d_position<br/>od_msg/srv/SrvDepthPosition"]
+    CLIENT["ROS 2 Service Client"]
 
-- `src/voice_interface/voice_interface/robot_get_keyword_node.py`의 `MicConfig(..., device_index=10, ...)`
-- 마이크 인덱스는 USB 포트/OS마다 다르다. 확인 방법:
-  ```python
-  import pyaudio
-  p = pyaudio.PyAudio()
-  for i in range(p.get_device_count()):
-      print(i, p.get_device_info_by_index(i)['name'])
-  ```
+    CAMERA --> RGB
+    CAMERA --> DEPTH
+    CAMERA --> INFO
 
-### 3.7 OpenAI API 키
+    RGB --> IMG
+    DEPTH --> IMG
+    INFO --> IMG
 
-- `src/voice_interface/resource/.env` 파일에 아래 한 줄로 넣는다(이 파일은 `.gitignore`에 이미 걸려있어 커밋되지 않음 — 새로 만들어야 함):
-  ```
-  OPENAI_API_KEY=sk-...
-  ```
-- Whisper(STT)와 GPT-4o(명령 파싱) 둘 다 이 키를 쓴다.
+    IMG --> DETECTION
+    DETECTION --> YOLO
+    MODEL --> YOLO
 
-### 3.8 웨이크워드 / YOLO 모델
+    CLIENT -->|"Request: string target"| SERVICE
+    SERVICE --> DETECTION
+    DETECTION -->|"Response: float64[] depth_position"| SERVICE
+    SERVICE -->|"[x, y, z]"| CLIENT
+```
 
-- 웨이크워드는 `"헬로우 로키"` 전용으로 학습된 `src/voice_interface/resource/hello_rokey_8332_32.tflite`를 쓴다. 다른 웨이크워드를 쓰려면 [openWakeWord](https://github.com/dscripka/openWakeWord)로 새로 학습해서 교체.
-- YOLO 모델은 `src/object_detection/object_detection/yolo.py`의 `YOLO_MODEL_FILENAME = "yolov8s_seg_250.pt"` — 자기 물체로 새로 학습한 세그멘테이션 모델을 `resource/`에 넣고 파일명을 맞춘다. **모델을 바꾸면 클래스 순서가 다를 수 있으니 `class_name_tool.json`의 라벨 매핑을 모델의 실제 `model.names`와 대조해서 반드시 다시 맞출 것** (안 맞으면 엉뚱한 물체를 잡으러 감).
+### 처리 순서
 
-## 4. 빌드
+```text
+공구 이름 요청
+    ↓
+약 1초 동안 RGB/Depth 프레임 수집
+    ↓
+YOLOv8 공구 탐지
+    ↓
+IoU 기반 Bounding Box 그룹화
+    ↓
+클래스 다수결 투표
+    ↓
+최종 Bounding Box 중심 픽셀 계산
+    ↓
+정렬된 Depth 이미지에서 거리 추출
+    ↓
+Camera Intrinsics 기반 3D 좌표 변환
+    ↓
+카메라 좌표계 [x, y, z] 반환
+```
+
+---
+
+## Package Structure
+
+### 패키지 구성
+
+| 패키지 | 빌드 타입 | 역할 |
+|---|---|---|
+| `od_msg` | `ament_cmake` | 커스텀 서비스 `SrvDepthPosition.srv` 정의 |
+| `object_detection` | `ament_python` | YOLO 탐지, Depth 처리, 3D 좌표 계산 및 서비스 제공 |
+| `realsense_subscriber` | `ament_python` | RealSense RGB/Depth 구독 및 시각화 디버그 유틸리티 |
+
+### 디렉토리 구조
+
+```text
+ros2_ws/
+└── src/
+    ├── od_msg/
+    │   ├── CMakeLists.txt
+    │   ├── package.xml
+    │   └── srv/
+    │       └── SrvDepthPosition.srv
+    │
+    ├── object_detection/
+    │   ├── package.xml
+    │   ├── setup.py
+    │   ├── object_detection/
+    │   │   ├── realsense.py
+    │   │   ├── detection.py
+    │   │   └── yolo.py
+    │   └── resource/
+    │       ├── yolov8n_tools_0122.pt
+    │       ├── class_name_tool.json
+    │       └── T_gripper2camera.npy
+    │
+    └── realsense_subscriber/
+        ├── package.xml
+        ├── setup.py
+        └── realsense_subscriber/
+            └── ...
+```
+
+> 위 트리는 핵심 패키지와 주요 리소스를 중심으로 표현한 구조입니다.
+
+---
+
+## Prerequisites
+
+### 환경
+
+| 항목 | 요구 사항 |
+|---|---|
+| OS | Ubuntu `<!-- 버전 확인 필요 -->` |
+| ROS 2 | `<!-- distro 확인 필요: Humble 추정이나 코드 기준 확인 필요 -->` |
+| Camera | Intel RealSense D400 계열 |
+| Camera Driver | `realsense-ros` |
+| Build Tool | `colcon` |
+| License | `<!-- 확인 필요 -->` |
+
+### Python 의존성
+
+- `ultralytics`
+- `opencv-python`
+- `numpy`
+- `cv_bridge`
 
 ```bash
-cd ~/robot_ws
-source /opt/ros/humble/setup.bash
-source ~/<doosan-robot2-workspace>/install/setup.bash   # 로봇 드라이버 워크스페이스
-colcon build
+python3 -m pip install ultralytics opencv-python numpy
+```
+
+### ROS 2 의존성
+
+- `rclpy`
+- `sensor_msgs`
+- `cv_bridge`
+- `ament_index_python`
+- `realsense-ros`
+- `realsense2_camera`
+
+> 현재 일부 의존성이 각 패키지의 `package.xml`에 누락되어 있으므로, 빌드 전에 위 의존성을 별도로 확인해야 합니다.
+
+---
+
+## Installation & Build
+
+### 1. 저장소 준비
+
+프로젝트가 `~/ros2_ws` 경로에 있다고 가정합니다.
+
+```bash
+cd ~/ros2_ws
+```
+
+### 2. `od_msg` 인터페이스 패키지 빌드
+
+`object_detection` 패키지가 `od_msg`의 커스텀 서비스를 사용하므로, `od_msg`가 먼저 빌드되어야 합니다.
+
+```bash
+colcon build --symlink-install --packages-select od_msg
 source install/setup.bash
 ```
 
-## 5. 실행
-
-**순서 상관없이** 아래를 다 띄운 뒤(각 노드가 서로 필요한 서비스/액션서버를 기다리게 되어 있음):
+### 3. 전체 워크스페이스 빌드
 
 ```bash
-# 1) 로봇 드라이버 (별도 워크스페이스)
-ros2 launch dsr_bringup2 dsr_bringup2_rviz.launch.py mode:=real host:=<로봇IP> model:=m0609
-
-# 2) RealSense 카메라
-ros2 launch realsense2_camera rs_launch.py
-
-# 3) 이 워크스페이스의 애플리케이션 노드들
-ros2 launch my_robot_pkg pnp_bringup.launch.py
+cd ~/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
 ```
 
-디버깅할 땐 3번 대신 아래처럼 노드를 하나씩 따로 띄우면 로그 확인이 훨씬 편하다:
+### 4. 새 터미널에서 환경 적용
+
+새 터미널을 열 때마다 다음 명령을 실행합니다.
 
 ```bash
-ros2 run object_detection object_detection_node
-ros2 run voice_interface get_keyword_node
-ros2 run safety_monitor safety_monitor_node
-ros2 run my_robot_pkg motion_node
-ros2 run my_robot_pkg brain_node
-ros2 run pointcloud_perception world_map_node
-ros2 run obstacle_avoidance rl_avoidance_node
+cd ~/ros2_ws
+source install/setup.bash
 ```
 
-`world_map_node`/`rl_avoidance_node`는 서로/다른 노드를 기다리지 않고 독립적으로
-뜬다. `world_map_node`는 `update_world_map` 서비스가 실제로 호출될 때만 MoveLine을
-움직인다 — 로봇 드라이버(`dsr_bringup2`)와 RealSense 카메라가 먼저 떠 있어야
-스캔이 성공한다.
+### 5. 서비스 인터페이스 확인
 
-## 6. 음성 명령 사용법
+```bash
+ros2 interface show od_msg/srv/SrvDepthPosition
+```
 
-1. "헬로우 로키"로 웨이크업
-2. 명령: `"빨간색 통을 1번 위치로 옮겨"` (obj_A/B/C = 빨강/파랑/초록, target1/2/3)
-3. 웨이크워드 한 번으로 세션이 열려 있는 동안(`MAX_SESSION_SEC`)은 재웨이크 없이 연달아 명령 가능
-4. "정지"/"멈춰" 등으로 즉시 정지, "다시 시작해" 등으로 재개(안전 래치만 해제, 자동 재시도는 안 함)
-5. "월드맵 업데이트 해줘"/"월드맵 스캔 시작" 등으로 전체 스캔 트리거 — brain_node가
-   `update_world_map` 서비스를 호출하고, 완료/실패/시간초과를 음성으로 안내한다
-   (스캔은 수 분 걸릴 수 있음). 결과 장애물 목록은 `/world_map/obstacles`로
-   publish되고 `rl_avoidance_node`가 구독해 캐시한다(정책 반영은 아직 미구현).
+서비스 인터페이스는 다음 구조를 가집니다.
+
+```text
+string target
+---
+float64[] depth_position
+```
+
+---
+
+## Usage
+
+RealSense 드라이버, 객체 탐지 서비스 노드, 서비스 호출은 각각 별도의 터미널에서 실행하는 것을 권장합니다.
+
+### Terminal 1: RealSense 드라이버 실행
+
+RGB 이미지의 탐지 픽셀과 Depth 픽셀을 일치시키기 위해 Depth-Color Align 기능을 반드시 활성화합니다.
+
+```bash
+ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true
+```
+
+필요한 토픽이 생성되었는지 확인합니다.
+
+```bash
+ros2 topic list | grep camera
+```
+
+객체 탐지 노드에서 사용하는 주요 토픽은 다음과 같습니다.
+
+```text
+/camera/camera/color/image_raw
+/camera/camera/aligned_depth_to_color/image_raw
+/camera/camera/color/camera_info
+```
+
+### Terminal 2: 객체 탐지 서비스 노드 실행
+
+```bash
+cd ~/ros2_ws
+source install/setup.bash
+
+ros2 run object_detection object_detection
+```
+
+서비스 등록 여부를 확인합니다.
+
+```bash
+ros2 service list | grep get_3d_position
+```
+
+서비스 타입을 확인합니다.
+
+```bash
+ros2 service type /get_3d_position
+```
+
+예상 타입:
+
+```text
+od_msg/srv/SrvDepthPosition
+```
+
+### Terminal 3: 공구 위치 요청
+
+```bash
+cd ~/ros2_ws
+source install/setup.bash
+```
+
+예를 들어 `hammer`의 3차원 위치를 요청하려면 다음 명령을 실행합니다.
+
+```bash
+ros2 service call /get_3d_position \
+  od_msg/srv/SrvDepthPosition \
+  "{target: 'hammer'}"
+```
+
+응답 형식:
+
+```text
+depth_position:
+- x
+- y
+- z
+```
+
+| 값 | 의미 | 단위 |
+|---|---|---|
+| `x` | 카메라 좌표계의 좌우 방향 위치 | meter |
+| `y` | 카메라 좌표계의 상하 방향 위치 | meter |
+| `z` | 카메라로부터의 깊이 방향 거리 | meter |
+
+탐지에 실패하면 다음 좌표가 반환됩니다.
+
+```text
+[0.0, 0.0, 0.0]
+```
+
+### 지원 클래스별 호출 예시
+
+#### Drill
+
+```bash
+ros2 service call /get_3d_position \
+  od_msg/srv/SrvDepthPosition \
+  "{target: 'drill'}"
+```
+
+#### Hammer
+
+```bash
+ros2 service call /get_3d_position \
+  od_msg/srv/SrvDepthPosition \
+  "{target: 'hammer'}"
+```
+
+#### Pliers
+
+```bash
+ros2 service call /get_3d_position \
+  od_msg/srv/SrvDepthPosition \
+  "{target: 'pliers'}"
+```
+
+#### Screwdriver
+
+```bash
+ros2 service call /get_3d_position \
+  od_msg/srv/SrvDepthPosition \
+  "{target: 'screwdriver'}"
+```
+
+#### Wrench
+
+```bash
+ros2 service call /get_3d_position \
+  od_msg/srv/SrvDepthPosition \
+  "{target: 'wrench'}"
+```
+
+### 선택 사항: 디버그 시각화
+
+의도된 디버그 노드 실행 명령은 다음과 같습니다.
+
+```bash
+ros2 run realsense_subscriber subscribe_img
+```
+
+하지만 현재 `subscribe_img`와 `subscribe_txt`는 `realsense_subscriber/setup.py`의 `console_scripts`에 등록되어 있지 않아 `ros2 run`으로 바로 실행할 수 없습니다.
+
+`setup.py`에 entry point를 등록한 뒤 패키지를 다시 빌드해야 합니다.
+
+```bash
+cd ~/ros2_ws
+
+colcon build \
+  --symlink-install \
+  --packages-select realsense_subscriber
+
+source install/setup.bash
+```
+
+---
+
+## Service API
+
+### 기본 명세
+
+| 항목 | 값 |
+|---|---|
+| Service Name | `/get_3d_position` |
+| Service Type | `od_msg/srv/SrvDepthPosition` |
+| Request | `string target` |
+| Response | `float64[] depth_position` |
+| Response Format | `[x, y, z]` |
+| Coordinate Frame | Camera Coordinate Frame |
+| Unit | meter |
+| Detection Failure | `[0.0, 0.0, 0.0]` |
+
+### Request
+
+```text
+string target
+```
+
+`target`에는 다음 클래스 중 하나를 전달합니다.
+
+```text
+drill
+hammer
+pliers
+screwdriver
+wrench
+```
+
+### Response
+
+```text
+float64[] depth_position
+```
+
+응답 배열 순서:
+
+```text
+depth_position = [x, y, z]
+```
+
+### 호출 예시
+
+```bash
+ros2 service call /get_3d_position \
+  od_msg/srv/SrvDepthPosition \
+  "{target: 'screwdriver'}"
+```
+
+---
+
+## Model Information
+
+### YOLOv8 모델
+
+| 항목 | 내용 |
+|---|---|
+| Architecture | YOLOv8n |
+| Weight File | `yolov8n_tools_0122.pt` |
+| Model Type | Custom-trained object detection model |
+| Number of Classes | 5 |
+| Resource Path | `object_detection/resource/yolov8n_tools_0122.pt` |
+
+### 클래스 매핑
+
+클래스 인덱스 매핑은 다음 파일에 저장되어 있습니다.
+
+```text
+object_detection/resource/class_name_tool.json
+```
+
+```json
+{
+  "0": "drill",
+  "1": "hammer",
+  "2": "pliers",
+  "3": "screwdriver",
+  "4": "wrench"
+}
+```
+
+### Hand-Eye Calibration
+
+카메라와 로봇 그리퍼 사이의 좌표 변환을 위한 행렬은 다음 파일에 저장되어 있습니다.
+
+```text
+object_detection/resource/T_gripper2camera.npy
+```
+
+이 파일은 `gripper → camera` 변환 행렬입니다.
+
+> 현재 `/get_3d_position` 서비스가 반환하는 값은 카메라 좌표계 기준입니다. 실제 로봇 제어에 사용하려면 hand-eye calibration 결과와 로봇의 현재 자세를 이용한 추가 좌표 변환이 필요합니다.
+
+---
+
+## Robot Integration / TODO
+
+### 로봇 연동 흐름
+
+```text
+로봇 작업 노드
+    ↓
+/get_3d_position 서비스 요청
+    ↓
+공구의 카메라 좌표계 위치 획득
+    ↓
+T_gripper2camera.npy 기반 좌표계 변환
+    ↓
+로봇 기준 목표 위치 계산
+    ↓
+Pick-and-Place 동작 수행
+```
+
+### 주의사항
+
+1. **Depth Align 활성화**
+
+   RGB 탐지 픽셀과 Depth 픽셀을 일치시키기 위해 다음 옵션이 반드시 필요합니다.
+
+   ```bash
+   align_depth.enable:=true
+   ```
+
+2. **탐지 실패 처리**
+
+   탐지 실패 시 `[0.0, 0.0, 0.0]`이 반환됩니다. 로봇 제어 노드에서는 이 값을 유효한 목표 좌표로 사용하지 않도록 검사해야 합니다.
+
+3. **좌표계 확인**
+
+   서비스 반환 좌표는 로봇 기준 좌표가 아니라 카메라 좌표계 기준 좌표입니다.
+
+4. **캘리브레이션 확인**
+
+   카메라 장착 위치나 각도가 변경된 경우 기존 `T_gripper2camera.npy`를 그대로 사용하지 말고 hand-eye calibration 결과를 다시 확인해야 합니다.
+
+5. **요청 클래스 확인**
+
+   서비스 요청에는 지원되는 클래스 이름만 사용해야 합니다.
+
+### TODO
+
+- [ ] ROS 2 배포판 확인 및 문서 반영
+- [ ] Ubuntu 버전 확인 및 문서 반영
+- [ ] License 확정
+- [ ] 저장소 루트에 `LICENSE` 파일 추가
+- [ ] 각 패키지의 `package.xml`에 누락된 의존성 추가
+- [ ] `realsense_subscriber/setup.py`에 `subscribe_img` 등록
+- [ ] `realsense_subscriber/setup.py`에 `subscribe_txt` 등록
+- [ ] 디버그 노드 실행 검증
+- [ ] `T_gripper2camera.npy` 변환 행렬 검증
+- [ ] 카메라 좌표계에서 로봇 좌표계로의 변환 과정 검증
+- [ ] 실제 로봇 팔 pick-and-place 연동 테스트
+- [ ] 데모 이미지 또는 GIF 추가
+
+---
+
+## License & Author
+
+### License
+
+```text
+<!-- 확인 필요: package.xml의 License 항목과 저장소 LICENSE 파일 확정 필요 -->
+```
+
+현재 프로젝트 License는 확정되지 않았습니다.
+
+오픈소스로 배포하기 전에 다음 항목을 업데이트해야 합니다.
+
+- 저장소 루트의 `LICENSE` 파일
+- 각 패키지의 `package.xml`
+- README 상단 License 배지
+- 본 License 섹션
+
+### Author
+
+- **soo**
+- Email: [poi3824@gmail.com](mailto:poi3824@gmail.com)
